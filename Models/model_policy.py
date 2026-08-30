@@ -6,12 +6,11 @@ from transformers import (
 )
 
 from Models.models import GenerateModel
-
 import logging
+
+
 logger = logging.getLogger(__name__)
-
-NAME = "Policy"
-
+NAME = "Policy Model"
 
 
 class PolicyModel(GenerateModel):
@@ -21,10 +20,11 @@ class PolicyModel(GenerateModel):
         self.model_name: str = model_name
         self.tokenizer  = AutoTokenizer.from_pretrained(model_name)
         self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(model_name)
+        self.lock_log = True
         
         
     def generate(self, prompt: str) -> str:
-        logger.info(NAME + " generating text")
+        logger.info("%s: Generating text", NAME)
 
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
 
@@ -33,14 +33,18 @@ class PolicyModel(GenerateModel):
             max_new_tokens=512,
             do_sample=True,
             temperature=0.7,
+            pad_token_id=self.tokenizer.eos_token_id,
         )
 
-        generated_text = self.tokenizer.decode(
-            output_ids[0],
+        input_length = inputs["input_ids"].shape[1]
+        generated_ids = output_ids[0][input_length:]
+
+
+        logger.info("%s: Stop generating text", NAME)
+        return self.tokenizer.decode(
+            generated_ids,
             skip_special_tokens=True
         )
-
-        return generated_text
     
     
     def generate_with_question(self, prompt: str) -> str:
@@ -50,5 +54,7 @@ class PolicyModel(GenerateModel):
             Request: {prompt}
             Model answer: {answer}
         """
+        
+        logger.debug("%s: Policy model output: %s", NAME, full_text)
         
         return full_text
