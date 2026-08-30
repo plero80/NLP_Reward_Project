@@ -1,0 +1,8 @@
+openai
+numpy
+torch
+datasets
+scikit-learn
+transformers
+trl
+peft
