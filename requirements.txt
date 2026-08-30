@@ -1,9 +1,9 @@
 openai
 python-dotenv
 numpy
-torch
+torch>=2.6
 datasets
 scikit-learn
 transformers
-trl
+trl>=1.10,<2
 peft

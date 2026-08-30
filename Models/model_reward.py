@@ -15,19 +15,114 @@ from concurrent.futures import ThreadPoolExecutor
 
 from collections.abc import Sequence
 import logging
+from types import SimpleNamespace
+from typing import Any
+
+from Models.runtime import best_dtype, current_device
 
 
 
 logger = logging.getLogger(__name__)
 
 
+class _CompositeRewardBackbone(torch.nn.Module):
+    def __init__(
+        self,
+        reward_model: torch.nn.Module,
+        classifiers: list[torch.nn.Module],
+        state: SimpleNamespace,
+    ) -> None:
+        super().__init__()
+        self.reward_model = reward_model
+        self.classifiers = torch.nn.ModuleList(classifiers)
+        self.state = state
+
+    def forward(self, **kwargs: Any) -> Any:
+        reward_backbone = getattr(
+            self.reward_model,
+            self.reward_model.base_model_prefix,
+        )
+        output = reward_backbone(**kwargs)
+
+        input_ids = kwargs["input_ids"]
+        attention_mask = kwargs.get("attention_mask")
+        penalties = torch.zeros(
+            input_ids.shape[0],
+            device=input_ids.device,
+            dtype=output.hidden_states[-1].dtype,
+        )
+        with torch.no_grad():
+            for classifier in self.classifiers:
+                logits = classifier(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    return_dict=True,
+                ).logits
+                if logits.shape[-1] == 2:
+                    probability = torch.softmax(logits.float(), dim=-1)[:, 1]
+                elif logits.shape[-1] == 1:
+                    probability = torch.sigmoid(logits.float().squeeze(-1))
+                else:
+                    raise ValueError(
+                        "Reward classifiers must output one or two logits"
+                    )
+                probability = probability.clamp(0.0, 1.0 - 1e-12)
+                penalties += torch.log1p(-probability).to(penalties.dtype)
+
+        self.state.penalties = penalties
+        return output
+
+
+class CompositeRewardModel(torch.nn.Module):
+    """Expose classifier-adjusted rewards through TRL PPO's model contract."""
+
+    base_model_prefix = "backbone"
+
+    def __init__(
+        self,
+        reward_model: torch.nn.Module,
+        classifiers: list[torch.nn.Module],
+    ) -> None:
+        super().__init__()
+        self.config = reward_model.config
+        self._state = SimpleNamespace(penalties=None)
+        self.backbone = _CompositeRewardBackbone(
+            reward_model,
+            classifiers,
+            self._state,
+        )
+
+    def score(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        reward_logits = self.backbone.reward_model.score(hidden_states)
+        penalties = self._state.penalties
+        if penalties is None:
+            raise RuntimeError("Composite reward backbone must run before score")
+        return reward_logits + penalties[:, None, None]
+
+
 class RewardModel(ScoreModel):
     
-    def __init__(self, model_name, model_mode, load = False, checkpoint = None) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        model_mode: str,
+        load: bool = False,
+        checkpoint: str | None = None,
+    ) -> None:
+        if load and not checkpoint:
+            raise ValueError("checkpoint is required when load=True")
+        model_source = checkpoint if load and checkpoint is not None else model_name
         self.base_model_prefix = model_name
         self.model_mode = model_mode
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            model_source,
+            dtype=best_dtype(),
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(model_source)
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.model.config.pad_token_id = self.tokenizer.pad_token_id
+        self.model.to(current_device())
         self.classifiers: list[dict] = []
         
         
@@ -60,6 +155,16 @@ class RewardModel(ScoreModel):
             name,
             path,
         )
+
+    def for_ppo(self) -> torch.nn.Module:
+        """Return the base or classifier-adjusted model expected by TRL PPO."""
+        if not self.classifiers:
+            return self.model
+        classifier_models = [
+            entry["classifier"].model
+            for entry in self.classifiers
+        ]
+        return CompositeRewardModel(self.model, classifier_models)
         
         
 

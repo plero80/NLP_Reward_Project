@@ -11,6 +11,7 @@ from torch.utils.data import Dataset
 
 from Models.models import GenerateModel
 from Models.lora import LoRASettings
+from Models.runtime import best_dtype, current_device
 import logging
 
 
@@ -33,6 +34,8 @@ class _CausalLanguageModel(Protocol):
 
     def save_pretrained(self, path: str) -> None: ...
 
+    def to(self, device: torch.device | str) -> Any: ...
+
 
 class PolicyModel(GenerateModel):
     
@@ -52,7 +55,10 @@ class PolicyModel(GenerateModel):
         self.tokenizer.padding_side = "left"
         
         
-        base_model = AutoModelForCausalLM.from_pretrained(model_name)
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=best_dtype(),
+        )
         if lora_settings is not None:
             model = get_peft_model(
                 base_model,
@@ -66,6 +72,7 @@ class PolicyModel(GenerateModel):
         # this interface, but their third-party annotations do not express a
         # Pylance-compatible common type.
         self.model = cast(_CausalLanguageModel, model)
+        self.model.to(current_device())
 
 
     def save(self, path: str) -> None:

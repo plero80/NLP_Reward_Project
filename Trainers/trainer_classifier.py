@@ -1,13 +1,84 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+import logging
 
 from datasets import Dataset as HFDataset
+import numpy as np
 from peft import PeftModel, TaskType, get_peft_model
-from transformers import DataCollatorWithPadding, Trainer, TrainingArguments
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from transformers import (
+    DataCollatorWithPadding,
+    EvalPrediction,
+    Trainer,
+    TrainingArguments,
+)
 
 from Datasets.dataset_classifier import DatasetClassifier
 from Models.lora import LoRASettings
 from Models.model_classifier import Classifier
+
+
+logger = logging.getLogger(__name__)
+
+
+def compute_classifier_metrics(
+    evaluation: EvalPrediction,
+) -> dict[str, float]:
+    """Compute binary classification metrics from Trainer predictions."""
+    logits = evaluation.predictions
+    if isinstance(logits, tuple):
+        logits = logits[0]
+    logits = np.asarray(logits)
+    labels = np.asarray(evaluation.label_ids).astype(int)
+
+    if logits.ndim == 1 or logits.shape[-1] == 1:
+        flat_logits = logits.reshape(-1)
+        probabilities = 1.0 / (1.0 + np.exp(-np.clip(flat_logits, -80, 80)))
+    elif logits.shape[-1] == 2:
+        shifted = logits - logits.max(axis=-1, keepdims=True)
+        exponentials = np.exp(shifted)
+        probabilities = exponentials[:, 1] / exponentials.sum(axis=-1)
+    else:
+        raise ValueError(
+            f"Expected one or two classifier logits, got {logits.shape[-1]}"
+        )
+
+    predictions = (probabilities >= 0.5).astype(int)
+    unique_labels = np.unique(labels)
+    tn, fp, fn, tp = confusion_matrix(
+        labels,
+        predictions,
+        labels=[0, 1],
+    ).ravel()
+    metrics = {
+        "accuracy": float(accuracy_score(labels, predictions)),
+        "balanced_accuracy": float(
+            balanced_accuracy_score(labels, predictions)
+            if len(unique_labels) == 2
+            else accuracy_score(labels, predictions)
+        ),
+        "precision": float(
+            precision_score(labels, predictions, zero_division=0)
+        ),
+        "recall": float(recall_score(labels, predictions, zero_division=0)),
+        "f1": float(f1_score(labels, predictions, zero_division=0)),
+        "true_negatives": float(tn),
+        "false_positives": float(fp),
+        "false_negatives": float(fn),
+        "true_positives": float(tp),
+    }
+    if len(unique_labels) == 2:
+        metrics["roc_auc"] = float(roc_auc_score(labels, probabilities))
+    return metrics
 
 
 @dataclass(frozen=True)
@@ -91,6 +162,8 @@ class ClassifierTrainer:
             eval_strategy="epoch" if has_evaluation else "no",
             save_strategy="epoch",
             load_best_model_at_end=has_evaluation,
+            metric_for_best_model="f1" if has_evaluation else None,
+            greater_is_better=True if has_evaluation else None,
             report_to="none",
         )
 
@@ -103,6 +176,7 @@ class ClassifierTrainer:
             data_collator=DataCollatorWithPadding(
                 tokenizer=self.classifier.tokenizer
             ),
+            compute_metrics=compute_classifier_metrics,
         )
 
         trainer.train()
@@ -112,3 +186,17 @@ class ClassifierTrainer:
         self.classifier.tokenizer.save_pretrained(final_directory)
 
         return trainer
+
+    def evaluate(
+        self,
+        trainer: Trainer,
+        test_dataset: DatasetClassifier,
+    ) -> dict[str, Any]:
+        """Evaluate the trained classifier on a held-out dataset."""
+        prepared_test_dataset = self._prepare_dataset(test_dataset)
+        metrics = trainer.evaluate(
+            eval_dataset=prepared_test_dataset,
+            metric_key_prefix="test",
+        )
+        logger.info("Held-out classifier metrics: %s", metrics)
+        return metrics

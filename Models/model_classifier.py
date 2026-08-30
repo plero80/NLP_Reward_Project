@@ -13,6 +13,8 @@ from pathlib import Path
 from collections.abc import Sequence
 import logging
 
+from Models.runtime import best_dtype, current_device
+
 
 
 logger = logging.getLogger(__name__)
@@ -24,8 +26,12 @@ class Classifier(BinaryClassifier):
         self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model: PreTrainedModel | PeftModel | PeftMixedModel = (
-            AutoModelForSequenceClassification.from_pretrained(model_name)
+            AutoModelForSequenceClassification.from_pretrained(
+                model_name,
+                dtype=best_dtype(),
+            )
         )
+        self.model.to(current_device())
         self.name = name
         
         
