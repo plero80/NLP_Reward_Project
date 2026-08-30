@@ -1,13 +1,17 @@
+from Models.models import ScoreModel, BinaryClassifier
+from Models.model_classifier import Classifier
+
+
 from transformers import (
     AutoTokenizer,
-    AutoModelForCausalLM,
     AutoModelForSequenceClassification,
-    PreTrainedModel,
 )
+import math
 import torch
 
-from pathlib import Path
-from Models.models import ScoreModel
+from concurrent.futures import ThreadPoolExecutor
+
+
 
 from collections.abc import Sequence
 import logging
@@ -28,8 +32,13 @@ class RewardModel(ScoreModel):
         
         
         
-    def add_classifier(self, name, classifier, tokenizer):
-        logger.info("%s: Added the classifier: %s",self.model_mode, name)
+    def add_classifier(
+        self,
+        name: str,
+        classifier: BinaryClassifier,
+        tokenizer=None,
+    ) -> None:
+        logger.info("%s: Added the classifier: %s", self.model_mode, name)
         self.classifiers.append({
                                 "name" : name,
                                 "classifier" : classifier,
@@ -39,15 +48,11 @@ class RewardModel(ScoreModel):
         
         
     def load_classifier(self, name: str, path: str) -> None:
-        classifier = AutoModelForSequenceClassification.from_pretrained(
-            path
-        )
-        tokenizer = AutoTokenizer.from_pretrained(path)
+        classifier = Classifier(name=name, model_name=path)
+        classifier.model.to(self.model.device)
+        classifier.model.eval()
 
-        classifier.to(self.model.device)
-        classifier.eval()
-
-        self.add_classifier(name, classifier, tokenizer)
+        self.add_classifier(name, classifier, classifier.tokenizer)
 
         logger.info(
             "%s: Loaded classifier '%s' from %s",
@@ -58,17 +63,11 @@ class RewardModel(ScoreModel):
         
         
 
-    def score(
+    def _score_reward_model(
         self,
         prompts: Sequence[str],
         answers: Sequence[str],
     ) -> list[float]:
-
-        if len(prompts) != len(answers):
-            logger.error("%s: prompts and answers must have the same length")
-            raise ValueError("prompts and answers must have the same length")
-
-        
         logger.info("%s: Starting to calculate the score", self.model_mode)
         
         conversations = [
@@ -112,3 +111,82 @@ class RewardModel(ScoreModel):
         logger.debug("%s: Reward scores: %s", self.model_mode, scores)
 
         return scores
+
+    def score(
+        self,
+        prompts: Sequence[str],
+        answers: Sequence[str],
+    ) -> list[float]:
+        if len(prompts) != len(answers):
+            logger.error(
+                "%s: prompts and answers must have the same length",
+                self.model_mode,
+            )
+            raise ValueError("prompts and answers must have the same length")
+
+        if len(prompts) == 0:
+            return []
+
+        prompt_batch = list(prompts)
+        answer_batch = list(answers)
+
+        with ThreadPoolExecutor(
+            max_workers=len(self.classifiers) + 1,
+            thread_name_prefix="reward-inference",
+        ) as executor:
+            reward_future = executor.submit(
+                self._score_reward_model,
+                prompt_batch,
+                answer_batch,
+            )
+            classifier_futures = [
+                (
+                    entry["name"],
+                    executor.submit(
+                        entry["classifier"].predict_proba,
+                        prompt_batch,
+                        answer_batch,
+                    ),
+                )
+                for entry in self.classifiers
+            ]
+
+            scores = reward_future.result()
+            classifier_probabilities = [
+                (name, future.result())
+                for name, future in classifier_futures
+            ]
+
+        combined_scores = [float(score) for score in scores]
+        epsilon = 1e-12
+
+        # Apply R - sum(log(1 - P_classifier)) element-wise across the batch.
+        for classifier_name, probabilities in classifier_probabilities:
+            if len(probabilities) != len(combined_scores):
+                raise ValueError(
+                    f"Classifier '{classifier_name}' returned "
+                    f"{len(probabilities)} probabilities for "
+                    f"{len(combined_scores)} inputs"
+                )
+
+            for index, probability in enumerate(probabilities):
+                probability = float(probability)
+                if (
+                    not math.isfinite(probability)
+                    or probability < 0.0
+                    or probability > 1.0
+                ):
+                    raise ValueError(
+                        f"Classifier '{classifier_name}' returned invalid "
+                        f"probability {probability} at index {index}"
+                    )
+
+                safe_probability = min(probability, 1.0 - epsilon)
+                combined_scores[index] += math.log1p(-safe_probability)
+
+        logger.debug(
+            "%s: Combined reward scores: %s",
+            self.model_mode,
+            combined_scores,
+        )
+        return combined_scores

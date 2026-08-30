@@ -18,11 +18,12 @@ logger = logging.getLogger(__name__)
 
 class Classifier(BinaryClassifier):
     
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, name, model_name: str) -> None:
         
         self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        self.name = name
         
         
     def predict(
@@ -31,12 +32,17 @@ class Classifier(BinaryClassifier):
             answers: Sequence[str],
             threshold: float = 0.5
         ) -> list[int]:
-        
+
             probabilities = self.predict_proba(prompts, answers)
+            logger.info("Classifier:%s predicting the labels", self.name)
             
-            return [
-                    int(label >= threshold) for label in probabilities
+            labels = [
+                int(label >= threshold) for label in probabilities
             ]
+            
+            logger.debug("Classifier:%s labels: %s", self.name, labels)
+            return labels
+    
     
     def predict_proba(
         self,
@@ -50,6 +56,10 @@ class Classifier(BinaryClassifier):
         if not prompts:
             return []
 
+        
+        logger.info("Classifier:%s predicting the inputs", self.name)
+        
+        
         inputs = self.tokenizer(
             list(prompts),
             list(answers),
@@ -82,4 +92,7 @@ class Classifier(BinaryClassifier):
                 f"Expected 1 or 2 output logits, got {logits.shape[-1]}"
             )
 
-        return probabilities.float().cpu().tolist()
+        outputs = probabilities.float().cpu().tolist()
+        
+        logger.debug("Classifier:%s probabilities: %s", self.name, outputs)
+        return outputs
