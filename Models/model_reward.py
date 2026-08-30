@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 class RewardModel(ScoreModel):
     
-    def __init__(self, model_name, model_mode) -> None:
+    def __init__(self, model_name, model_mode, load = False, checkpoint = None) -> None:
         self.base_model_prefix = model_name
         self.model_mode = model_mode
         self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
@@ -160,7 +160,7 @@ class RewardModel(ScoreModel):
         combined_scores = [float(score) for score in scores]
         epsilon = 1e-12
 
-        # Apply R - sum(log(1 - P_classifier)) element-wise across the batch.
+        # Penalize high undesirable-class probabilities across the batch.
         for classifier_name, probabilities in classifier_probabilities:
             if len(probabilities) != len(combined_scores):
                 raise ValueError(

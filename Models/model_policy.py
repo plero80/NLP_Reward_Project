@@ -1,14 +1,16 @@
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
-    AutoModelForSequenceClassification,
-    PreTrainedModel,
 )
+from typing import Any, Protocol, cast
 import torch
+from peft import TaskType, get_peft_model
+from torch.utils.data import Dataset
 
 
 
 from Models.models import GenerateModel
+from Models.lora import LoRASettings
 import logging
 
 
@@ -16,9 +18,29 @@ logger = logging.getLogger(__name__)
 NAME = "Policy Model"
 
 
+class _CausalLanguageModel(Protocol):
+    """The model surface used by ``PolicyModel``.
+
+    This avoids leaking Transformers' internal generation protocol into this
+    module.  In Transformers 5, that protocol is currently incompatible with
+    Pylance's view of ``PreTrainedModel.device``.
+    """
+
+    @property
+    def device(self) -> torch.device: ...
+
+    def generate(self, **kwargs: Any) -> torch.LongTensor: ...
+
+    def save_pretrained(self, path: str) -> None: ...
+
+
 class PolicyModel(GenerateModel):
     
-    def __init__(self, model_name ) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        lora_settings: LoRASettings | None = None,
+    ) -> None:
         
         self.model_name: str = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -30,15 +52,34 @@ class PolicyModel(GenerateModel):
         self.tokenizer.padding_side = "left"
         
         
-        self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(model_name)
+        base_model = AutoModelForCausalLM.from_pretrained(model_name)
+        if lora_settings is not None:
+            model = get_peft_model(
+                base_model,
+                lora_settings.build(TaskType.CAUSAL_LM),
+            )
+            model.print_trainable_parameters()
+        else:
+            model = base_model
+
+        # AutoModelForCausalLM and the CAUSAL_LM PEFT wrapper both implement
+        # this interface, but their third-party annotations do not express a
+        # Pylance-compatible common type.
+        self.model = cast(_CausalLanguageModel, model)
+
+
+    def save(self, path: str) -> None:
+        self.model.save_pretrained(path)
+        self.tokenizer.save_pretrained(path)
         
         
     def generate(self, prompt: str) -> str:
         logger.info("%s: Generating text", NAME)
 
+        generation_model: Any = self.model
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
 
-        output_ids = self.model.generate(
+        output_ids = generation_model.generate(
             **inputs,
             max_new_tokens=512,
             do_sample=True,
@@ -70,8 +111,10 @@ class PolicyModel(GenerateModel):
             truncation=True,
         ).to(self.model.device)
 
+        generation_model: Any = self.model
+
         with torch.inference_mode():
-            output_ids = self.model.generate(
+            output_ids = generation_model.generate(
                 **inputs,
                 max_new_tokens=512,
                 do_sample=True,
@@ -92,6 +135,48 @@ class PolicyModel(GenerateModel):
 
         return answers
     
+    
+    
+    def generate_new_dataset(
+        self,
+        dataset: Dataset,
+        batch_size: int = 8,
+    ) -> Dataset:
+        """Return a copy of ``dataset`` with generated ``answers``."""
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+
+        if "answers" in dataset.column_names:
+            raise ValueError("dataset already contains an 'answers' column")
+
+        prompt_column = (
+            "prompt"
+            if "prompt" in dataset.column_names
+            else "prompts"
+            if "prompts" in dataset.column_names
+            else None
+        )
+        if prompt_column is None:
+            raise ValueError("dataset must contain a 'prompt' or 'prompts' column")
+
+        prompts = dataset[prompt_column]
+        answers: list[str] = []
+
+        for start in range(0, len(prompts), batch_size):
+            raw_prompt_batch = list(prompts[start : start + batch_size])
+            if not all(isinstance(prompt, str) for prompt in raw_prompt_batch):
+                raise TypeError("all prompts must be strings")
+            prompt_batch = cast(list[str], raw_prompt_batch)
+            answers.extend(self.generate_batch(prompt_batch))
+
+        if len(answers) != len(dataset):
+            raise RuntimeError(
+                "generation must return exactly one answer for every prompt"
+            )
+
+        return dataset.add_column("answers", answers)
+        
+        
     
     
     

@@ -6,6 +6,7 @@ from transformers import (
     PreTrainedModel,
 )
 import torch
+from peft import PeftMixedModel, PeftModel
 
 from pathlib import Path
 
@@ -22,7 +23,9 @@ class Classifier(BinaryClassifier):
         
         self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        self.model: PreTrainedModel | PeftModel | PeftMixedModel = (
+            AutoModelForSequenceClassification.from_pretrained(model_name)
+        )
         self.name = name
         
         
