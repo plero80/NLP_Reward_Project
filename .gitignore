@@ -1,1 +1,95 @@
+# Secrets and local configuration
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+config.local.py
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging and build output
+build/
+dist/
+downloads/
+*.egg-info/
+.eggs/
+wheels/
+pip-wheel-metadata/
+MANIFEST
+
+# Test, coverage, lint, and type-checker caches
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model weights, checkpoints, and generated artifacts
+checkpoints/
+outputs/
+artifacts/
+evaluations/
+runs/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.onnx
+
+# ML experiment trackers
+wandb/
+mlruns/
+lightning_logs/
+ray_results/
+tensorboard/
+
+# Downloaded datasets and model caches
+data/
+cache/
+.cache/
+huggingface/
+.huggingface/
+
+# Logs and temporary files
+logs/
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+# IDE and editor settings
+.vscode/
+.idea/
+*.code-workspace
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# RunPod/local mounted workspace content
+workspace/
+runpod-volume/
