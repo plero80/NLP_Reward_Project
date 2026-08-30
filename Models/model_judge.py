@@ -6,7 +6,6 @@ from transformers import (
 )
 import torch
 
-from pathlib import Path
 from Models.models import ScoreModel
 
 from collections.abc import Sequence
@@ -15,46 +14,15 @@ import logging
 
 
 logger = logging.getLogger(__name__)
-
+NAME = " Model"
 
 class RewardModel(ScoreModel):
     
-    def __init__(self, model_name, model_mode) -> None:
+    
+    def __init__(self, model_name) -> None:
         self.base_model_prefix = model_name
-        self.model_mode = model_mode
         self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.classifiers: list[dict] = []
-        
-        
-        
-    def add_classifier(self, name, classifier, tokenizer):
-        logger.info("%s: Added the classifier: %s",self.model_mode, name)
-        self.classifiers.append({
-                                "name" : name,
-                                "classifier" : classifier,
-                                "tokenizer" : tokenizer
-                            })
-        
-        
-        
-    def load_classifier(self, name: str, path: str) -> None:
-        classifier = AutoModelForSequenceClassification.from_pretrained(
-            path
-        )
-        tokenizer = AutoTokenizer.from_pretrained(path)
-
-        classifier.to(self.model.device)
-        classifier.eval()
-
-        self.add_classifier(name, classifier, tokenizer)
-
-        logger.info(
-            "%s: Loaded classifier '%s' from %s",
-            self.model_mode,
-            name,
-            path,
-        )
         
         
 
@@ -69,7 +37,7 @@ class RewardModel(ScoreModel):
             raise ValueError("prompts and answers must have the same length")
 
         
-        logger.info("%s: Starting to calculate the score", self.model_mode)
+        logger.info("%s: Starting to calculate the score", NAME)
         
         conversations = [
             [
@@ -109,6 +77,6 @@ class RewardModel(ScoreModel):
             
         
         scores = outputs.logits.squeeze(-1).float().cpu().tolist()
-        logger.debug("%s: Reward scores: %s", self.model_mode, scores)
+        logger.debug("%s: Reward scores: %s", NAME, scores)
 
         return scores
