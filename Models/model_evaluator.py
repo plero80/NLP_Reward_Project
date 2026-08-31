@@ -283,7 +283,7 @@ class PrometheusEvaluator:
 
         output = self.model.generate(
             **inputs,
-            max_new_tokens=256,
+            max_new_tokens=512,
             do_sample=False,
             pad_token_id=self.tokenizer.eos_token_id,
         )
@@ -327,7 +327,7 @@ class PrometheusEvaluator:
 
         output = self.model.generate(
             **inputs,
-            max_new_tokens=256,
+            max_new_tokens=512,
             do_sample=False,
             pad_token_id=self.tokenizer.eos_token_id,
         )
