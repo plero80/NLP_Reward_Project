@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI, RateLimitError
 from pydantic import BaseModel
 from typing import Literal
+from collections.abc import Sequence
 import re
 
 
@@ -204,6 +205,9 @@ class PrometheusEvaluator:
         model_name: str = "prometheus-eval/prometheus-7b-v2.0"
     ):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
 
         dtype = (
             torch.bfloat16
@@ -217,6 +221,7 @@ class PrometheusEvaluator:
             dtype=dtype,
             device_map="auto",
         )
+        self.model.config.pad_token_id = self.tokenizer.pad_token_id
 
         self.model.eval()
 
@@ -250,6 +255,21 @@ class PrometheusEvaluator:
                 ###Feedback:"""
 
 
+    @staticmethod
+    def _extract_score(result: str) -> int:
+        match = re.search(
+            r"\[RESULT\]\s*([1-5])",
+            result
+        )
+
+        if match is None:
+            raise ValueError(
+                f"Could not extract Prometheus score.\n"
+                f"Model output:\n{result}"
+            )
+
+        return int(match.group(1))
+
 
     @torch.inference_mode()
     def score(self, prompt: str, answer: str) -> int:
@@ -282,16 +302,55 @@ class PrometheusEvaluator:
         # Prometheus should output:
         #
         # "...feedback... [RESULT] 4"
+        return self._extract_score(result)
+    
+    
+    
+    @torch.inference_mode()
+    def score_batch(self, prompts: Sequence[str], answers: Sequence[str]) -> list[int]:
+        if len(prompts) != len(answers):
+            raise ValueError("prompts and answers must have the same length")
 
-        match = re.search(
-            r"\[RESULT\]\s*([1-5])",
-            result
+        if len(prompts) == 0:
+            return []
+
+        evaluation_prompts = [
+            self._build_prompt(prompt, answer)
+            for prompt, answer in zip(prompts, answers)
+        ]
+
+        inputs = self.tokenizer(
+            evaluation_prompts,
+            return_tensors="pt",
+            padding=True,
+        ).to(self.model.device)
+
+        output = self.model.generate(
+            **inputs,
+            max_new_tokens=256,
+            do_sample=False,
+            pad_token_id=self.tokenizer.eos_token_id,
         )
 
-        if match is None:
-            raise ValueError(
-                f"Could not extract Prometheus score.\n"
-                f"Model output:\n{result}"
-            )
+        input_length = inputs["input_ids"].shape[1]
+        generated_tokens = output[:, input_length:]
 
-        return int(match.group(1))
+        results = self.tokenizer.batch_decode(
+            generated_tokens,
+            skip_special_tokens=True,
+        )
+
+        return [
+            self._extract_score(result)
+            for result in results
+        ]
+    
+    
+
+    def evaluate(self, prompts: Sequence[str], answers: Sequence[str]) -> float:
+        
+        scores = self.score_batch(prompts, answers)
+        if not scores:
+            raise ValueError("cannot evaluate an empty batch")
+
+        return sum(scores) / len(scores)
