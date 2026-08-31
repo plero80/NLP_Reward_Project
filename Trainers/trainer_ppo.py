@@ -58,9 +58,9 @@ class PolicyPPOTrainer:
                 )
         if self.reward.model.config.num_labels != 1:
             raise ValueError("TRL PPO requires a reward model with num_labels=1")
-        self.train_dataset = self._prepare_dataset(train_dataset)
+        self.train_dataset = train_dataset
         self.eval_dataset = (
-            self._prepare_dataset(eval_dataset)
+            eval_dataset
             if eval_dataset is not None
             else None
         )

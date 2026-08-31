@@ -14,7 +14,7 @@ class GenerateModel(Protocol):
     def generate_with_question(self, prompt: str) -> tuple:
         ...
         
-    def generate_batch(self, prompts: list[str]) -> list[str]:
+    def generate_batch(self, prompts: Sequence[str]) -> Sequence[str]:
         """Return a batch of answers in text"""
         ...
         

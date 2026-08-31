@@ -93,3 +93,6 @@ $RECYCLE.BIN/
 # RunPod/local mounted workspace content
 workspace/
 runpod-volume/
+
+
+lab.ipynb

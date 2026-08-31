@@ -73,6 +73,11 @@ class _CompositeRewardBackbone(torch.nn.Module):
         return output
 
 
+
+
+
+
+
 class CompositeRewardModel(torch.nn.Module):
     """Expose classifier-adjusted rewards through TRL PPO's model contract."""
 
@@ -123,7 +128,20 @@ class RewardModel(ScoreModel):
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
         self.model.to(current_device())
+        self.model.eval()
         self.classifiers: list[dict] = []
+        self.std = None
+        self.mean = None
+        
+        
+    def init_normalization(self, prompts: Sequence[str], answers: Sequence[str]) -> None:
+        
+        scores = self.score(prompts, answers)
+        scores = torch.as_tensor(scores, dtype=torch.float32)
+
+        self.mean = scores.mean()
+        self.std = scores.std(correction=0)
+        
         
         
         
@@ -134,6 +152,9 @@ class RewardModel(ScoreModel):
         tokenizer=None,
     ) -> None:
         logger.info("%s: Added the classifier: %s", self.model_mode, name)
+        classifier_model = getattr(classifier, "model", None)
+        if classifier_model is not None:
+            classifier_model.eval()
         self.classifiers.append({
                                 "name" : name,
                                 "classifier" : classifier,
@@ -159,12 +180,15 @@ class RewardModel(ScoreModel):
     def for_ppo(self) -> torch.nn.Module:
         """Return the base or classifier-adjusted model expected by TRL PPO."""
         if not self.classifiers:
+            self.model.eval()
             return self.model
         classifier_models = [
             entry["classifier"].model
             for entry in self.classifiers
         ]
-        return CompositeRewardModel(self.model, classifier_models)
+        composite_model = CompositeRewardModel(self.model, classifier_models)
+        composite_model.eval()
+        return composite_model
         
         
 
@@ -294,4 +318,13 @@ class RewardModel(ScoreModel):
             self.model_mode,
             combined_scores,
         )
+        
+        if self.std is not None and self.mean is not None:
+            normalized_scores = (
+                torch.as_tensor(combined_scores, dtype=torch.float32)
+                - self.mean.cpu()
+            ) / (self.std.cpu() + 1e-8)
+            combined_scores = normalized_scores.tolist()
+            
+            
         return combined_scores

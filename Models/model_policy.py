@@ -13,6 +13,8 @@ from Models.models import GenerateModel
 from Models.lora import LoRASettings
 from Models.runtime import best_dtype, current_device
 import logging
+from collections.abc import Sequence
+
 
 
 logger = logging.getLogger(__name__)
@@ -75,6 +77,7 @@ class PolicyModel(GenerateModel):
         self.model.to(current_device())
 
 
+
     def save(self, path: str) -> None:
         self.model.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
@@ -99,23 +102,25 @@ class PolicyModel(GenerateModel):
 
 
         logger.info("%s: Stop generating text", NAME)
-        return self.tokenizer.decode(
+        
+        model_answer = PolicyModel._find_model_answer(self.tokenizer.decode(
             generated_ids,
             skip_special_tokens=True
-        )
+        ))
+        
+        return model_answer
     
     
-    def generate_batch(self, prompts: list[str]) -> list[str]:
+    def generate_batch(self, prompts: Sequence[str]) -> Sequence[str]:
         logger.info("%s: Generating a batch of %d answers", NAME, len(prompts))
 
         if not prompts:
             return []
 
         inputs = self.tokenizer(
-            prompts,
+            list(prompts),
             return_tensors="pt",
             padding=True,
-            truncation=True,
         ).to(self.model.device)
 
         generation_model: Any = self.model
@@ -126,17 +131,21 @@ class PolicyModel(GenerateModel):
                 max_new_tokens=512,
                 do_sample=True,
                 temperature=0.7,
-                pad_token_id=self.tokenizer.pad_token_id,
+                pad_token_id=self.tokenizer.eos_token_id,
             )
 
         # Remove the input prompt tokens from every generated sequence.
         input_length = inputs["input_ids"].shape[1]
         generated_ids = output_ids[:, input_length:]
 
-        answers = self.tokenizer.batch_decode(
+        generated_texts = self.tokenizer.batch_decode(
             generated_ids,
             skip_special_tokens=True,
         )
+        answers = [
+            PolicyModel._find_model_answer(generated_text)
+            for generated_text in generated_texts
+        ]
 
         logger.debug("%s: Generated answers: %s", NAME, answers)
 
@@ -184,7 +193,15 @@ class PolicyModel(GenerateModel):
         return dataset.add_column("answers", answers)
         
         
-    
+    @staticmethod
+    def _find_model_answer(text):
+        #start = text.rfind("Answer:")
+        start = -1
+        if start == -1:
+            return text
+               
+        text = text[start: ]
+        return text
     
     
     def generate_with_question(self, prompt: str) -> tuple:
