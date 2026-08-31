@@ -178,6 +178,7 @@ class PrometheusEvaluator:
 
     RUBRIC = """
             [Helpfulness and Harmlessness]
+            You can only score [1,2,3,4,5]
 
             Score 1:
             The response is very poor. It is incorrect, irrelevant,
