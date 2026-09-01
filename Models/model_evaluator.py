@@ -214,26 +214,31 @@ class PrometheusEvaluator:
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
 
         self.model.eval()
-        self._score_by_token_id: dict[int, int] = {}
+        self._score_by_token_sequence: dict[tuple[int, ...], int] = {}
         for score in range(1, 6):
-            # Depending on the tokenizer, a digit at this position may use
-            # either the bare or leading-space token.
-            for text in (str(score), f" {score}"):
-                token_ids = self.tokenizer.encode(
-                    text,
-                    add_special_tokens=False,
+            # Tokenizers may represent a score as one token or as a short
+            # sequence (for example, a whitespace token followed by a digit).
+            for text in (str(score), f" {score}", f"\n{score}"):
+                token_ids = tuple(
+                    self.tokenizer.encode(
+                        text,
+                        add_special_tokens=False,
+                    )
                 )
-                if len(token_ids) == 1:
-                    self._score_by_token_id[token_ids[0]] = score
+                if token_ids:
+                    self._score_by_token_sequence[token_ids] = score
 
         missing_scores = set(range(1, 6)) - set(
-            self._score_by_token_id.values()
+            self._score_by_token_sequence.values()
         )
         if missing_scores:
             raise RuntimeError(
-                "Evaluator tokenizer has no single token for scores: "
+                "Evaluator tokenizer cannot encode scores: "
                 f"{sorted(missing_scores)}"
             )
+        self._max_score_token_length = max(
+            len(token_ids) for token_ids in self._score_by_token_sequence
+        )
 
     def _build_prompt(self, prompt: str, answer: str) -> str:
         return f"""Evaluate the response for helpfulness, correctness, relevance,
@@ -260,26 +265,45 @@ Score:"""
 
         return int(match.group())
 
-    def _allowed_score_tokens(
-        self,
-        _batch_id: int,
-        _input_ids: torch.Tensor,
-    ) -> list[int]:
-        """Restrict generation to valid score tokens at decoding time."""
-        return list(self._score_by_token_id)
+    def _score_token_constraint(self, input_length: int):
+        """Build a decoding constraint for tokenizer-specific score strings."""
+        sequences = tuple(self._score_by_token_sequence)
+        eos_token_id = self.tokenizer.eos_token_id
+        if eos_token_id is None:
+            raise RuntimeError("Evaluator tokenizer has no EOS token")
+
+        def allowed_tokens(
+            _batch_id: int,
+            input_ids: torch.Tensor,
+        ) -> list[int]:
+            generated = tuple(input_ids[input_length:].tolist())
+            allowed: set[int] = set()
+
+            for sequence in sequences:
+                if sequence[:len(generated)] != generated:
+                    continue
+                if len(generated) == len(sequence):
+                    allowed.add(eos_token_id)
+                else:
+                    allowed.add(sequence[len(generated)])
+
+            # This should be unreachable, but EOS is safer than permitting an
+            # arbitrary token if a backend calls the constraint unexpectedly.
+            return list(allowed) if allowed else [eos_token_id]
+
+        return allowed_tokens
 
     def _scores_from_output(
         self,
         output: torch.Tensor,
         input_length: int,
     ) -> list[int]:
-        token_ids = output[:, input_length].tolist()
-        try:
-            return [self._score_by_token_id[token_id] for token_id in token_ids]
-        except KeyError as exc:
-            raise RuntimeError(
-                f"Evaluator generated an invalid constrained token: {exc.args[0]}"
-            ) from exc
+        generated_tokens = output[:, input_length:]
+        results = self.tokenizer.batch_decode(
+            generated_tokens,
+            skip_special_tokens=True,
+        )
+        return [self._extract_score(result) for result in results]
 
 
     @torch.inference_mode()
@@ -294,19 +318,17 @@ Score:"""
             max_length=2048,
         ).to(self.model.device)
 
+        input_length = inputs["input_ids"].shape[1]
         output = self.model.generate(
             **inputs,
-            max_new_tokens=1,
+            max_new_tokens=self._max_score_token_length + 1,
             do_sample=False,
             use_cache=True,
             pad_token_id=self.tokenizer.eos_token_id,
-            prefix_allowed_tokens_fn=self._allowed_score_tokens,
+            prefix_allowed_tokens_fn=self._score_token_constraint(input_length),
         )
 
-        return self._scores_from_output(
-            output,
-            inputs["input_ids"].shape[1],
-        )[0]
+        return self._scores_from_output(output, input_length)[0]
     
     
     
@@ -342,16 +364,18 @@ Score:"""
                 max_length=2048,
             ).to(self.model.device)
 
+            input_length = inputs["input_ids"].shape[1]
             output = self.model.generate(
                 **inputs,
-                max_new_tokens=1,
+                max_new_tokens=self._max_score_token_length + 1,
                 do_sample=False,
                 use_cache=True,
                 pad_token_id=self.tokenizer.eos_token_id,
-                prefix_allowed_tokens_fn=self._allowed_score_tokens,
+                prefix_allowed_tokens_fn=self._score_token_constraint(
+                    input_length
+                ),
             )
 
-            input_length = inputs["input_ids"].shape[1]
             scores.extend(self._scores_from_output(output, input_length))
 
             # Drop references to generation tensors before the next batch.
