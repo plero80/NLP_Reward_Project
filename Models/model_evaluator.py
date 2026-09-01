@@ -214,6 +214,26 @@ class PrometheusEvaluator:
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
 
         self.model.eval()
+        self._score_by_token_id: dict[int, int] = {}
+        for score in range(1, 6):
+            # Depending on the tokenizer, a digit at this position may use
+            # either the bare or leading-space token.
+            for text in (str(score), f" {score}"):
+                token_ids = self.tokenizer.encode(
+                    text,
+                    add_special_tokens=False,
+                )
+                if len(token_ids) == 1:
+                    self._score_by_token_id[token_ids[0]] = score
+
+        missing_scores = set(range(1, 6)) - set(
+            self._score_by_token_id.values()
+        )
+        if missing_scores:
+            raise RuntimeError(
+                "Evaluator tokenizer has no single token for scores: "
+                f"{sorted(missing_scores)}"
+            )
 
     def _build_prompt(self, prompt: str, answer: str) -> str:
         return f"""Evaluate the response for helpfulness, correctness, relevance,
@@ -240,6 +260,27 @@ Score:"""
 
         return int(match.group())
 
+    def _allowed_score_tokens(
+        self,
+        _batch_id: int,
+        _input_ids: torch.Tensor,
+    ) -> list[int]:
+        """Restrict generation to valid score tokens at decoding time."""
+        return list(self._score_by_token_id)
+
+    def _scores_from_output(
+        self,
+        output: torch.Tensor,
+        input_length: int,
+    ) -> list[int]:
+        token_ids = output[:, input_length].tolist()
+        try:
+            return [self._score_by_token_id[token_id] for token_id in token_ids]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"Evaluator generated an invalid constrained token: {exc.args[0]}"
+            ) from exc
+
 
     @torch.inference_mode()
     def score(self, prompt: str, answer: str) -> int:
@@ -255,27 +296,17 @@ Score:"""
 
         output = self.model.generate(
             **inputs,
-            max_new_tokens=4,
+            max_new_tokens=1,
             do_sample=False,
             use_cache=True,
             pad_token_id=self.tokenizer.eos_token_id,
+            prefix_allowed_tokens_fn=self._allowed_score_tokens,
         )
 
-        # Remove the original input tokens
-        generated_tokens = output[
-            0,
-            inputs["input_ids"].shape[1]:
-        ]
-
-        result = self.tokenizer.decode(
-            generated_tokens,
-            skip_special_tokens=True,
-        )
-
-        # Prometheus should output:
-        #
-        # "...feedback... [RESULT] 4"
-        return self._extract_score(result)
+        return self._scores_from_output(
+            output,
+            inputs["input_ids"].shape[1],
+        )[0]
     
     
     
@@ -313,22 +344,18 @@ Score:"""
 
             output = self.model.generate(
                 **inputs,
-                max_new_tokens=4,
+                max_new_tokens=1,
                 do_sample=False,
                 use_cache=True,
                 pad_token_id=self.tokenizer.eos_token_id,
+                prefix_allowed_tokens_fn=self._allowed_score_tokens,
             )
 
             input_length = inputs["input_ids"].shape[1]
-            generated_tokens = output[:, input_length:]
-            results = self.tokenizer.batch_decode(
-                generated_tokens,
-                skip_special_tokens=True,
-            )
-            scores.extend(self._extract_score(result) for result in results)
+            scores.extend(self._scores_from_output(output, input_length))
 
             # Drop references to generation tensors before the next batch.
-            del inputs, output, generated_tokens
+            del inputs, output
 
         return scores
     
