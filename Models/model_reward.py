@@ -9,10 +9,6 @@ from transformers import (
 import math
 import torch
 
-from concurrent.futures import ThreadPoolExecutor
-
-
-
 from collections.abc import Sequence
 import logging
 from types import SimpleNamespace
@@ -126,6 +122,9 @@ class RewardModel(ScoreModel):
         self.tokenizer = AutoTokenizer.from_pretrained(model_source)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        # Chat templates place the assistant response near the end. Preserve
+        # that response if an unusually long conversation must be truncated.
+        self.tokenizer.truncation_side = "left"
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
         self.model.to(current_device())
         self.model.eval()
@@ -134,12 +133,22 @@ class RewardModel(ScoreModel):
         self.mean = None
         
         
-    def init_normalization(self,policy: PolicyModel) -> None:
+    def init_normalization(
+        self,
+        policy: PolicyModel,
+        batch_size: int = 1,
+        max_length: int = 2_048,
+    ) -> None:
         
         prompts = policy.get_dataset_col("prompts")
         answers = policy.get_dataset_col("answers")
         
-        scores = self.score(prompts, answers)
+        scores = self.score(
+            prompts,
+            answers,
+            batch_size=batch_size,
+            max_length=max_length,
+        )
         scores = torch.as_tensor(scores, dtype=torch.float32)
 
         self.mean = scores.mean()
@@ -199,9 +208,8 @@ class RewardModel(ScoreModel):
         self,
         prompts: Sequence[str],
         answers: Sequence[str],
+        max_length: int,
     ) -> list[float]:
-        logger.info("%s: Starting to calculate the score", self.model_mode)
-        
         conversations = [
             [
                 {"role": "user", "content": prompt},
@@ -232,14 +240,20 @@ class RewardModel(ScoreModel):
             return_tensors="pt",
             padding=True,
             truncation=True,
-            max_length=16_384,
+            max_length=max_length,
         ).to(self.model.device)
 
         with torch.inference_mode():
             outputs = self.model(**inputs)
             
         
-        scores = outputs.logits.squeeze(-1).float().cpu().tolist()
+        score_tensor = outputs.logits.reshape(-1)
+        if score_tensor.numel() != len(prompts):
+            raise ValueError(
+                f"{self.model_mode} returned {score_tensor.numel()} scores "
+                f"for {len(prompts)} inputs"
+            )
+        scores = score_tensor.float().cpu().tolist()
         logger.debug("%s: Reward scores: %s", self.model_mode, scores)
 
         return scores
@@ -248,6 +262,8 @@ class RewardModel(ScoreModel):
         self,
         prompts: Sequence[str],
         answers: Sequence[str],
+        batch_size: int = 1,
+        max_length: int = 2_048,
     ) -> list[float]:
         if len(prompts) != len(answers):
             logger.error(
@@ -256,65 +272,69 @@ class RewardModel(ScoreModel):
             )
             raise ValueError("prompts and answers must have the same length")
 
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        if max_length < 1:
+            raise ValueError("max_length must be at least 1")
         if len(prompts) == 0:
             return []
 
+        logger.info(
+            "%s: Calculating %d scores in batches of %d",
+            self.model_mode,
+            len(prompts),
+            batch_size,
+        )
+
         prompt_batch = list(prompts)
         answer_batch = list(answers)
-
-        with ThreadPoolExecutor(
-            max_workers=len(self.classifiers) + 1,
-            thread_name_prefix="reward-inference",
-        ) as executor:
-            reward_future = executor.submit(
-                self._score_reward_model,
-                prompt_batch,
-                answer_batch,
-            )
-            classifier_futures = [
-                (
-                    entry["name"],
-                    executor.submit(
-                        entry["classifier"].predict_proba,
-                        prompt_batch,
-                        answer_batch,
-                    ),
-                )
-                for entry in self.classifiers
-            ]
-
-            scores = reward_future.result()
-            classifier_probabilities = [
-                (name, future.result())
-                for name, future in classifier_futures
-            ]
-
-        combined_scores = [float(score) for score in scores]
+        combined_scores: list[float] = []
         epsilon = 1e-12
 
-        # Penalize high undesirable-class probabilities across the batch.
-        for classifier_name, probabilities in classifier_probabilities:
-            if len(probabilities) != len(combined_scores):
-                raise ValueError(
-                    f"Classifier '{classifier_name}' returned "
-                    f"{len(probabilities)} probabilities for "
-                    f"{len(combined_scores)} inputs"
-                )
+        # Keep GPU activation memory bounded. Running classifiers after the
+        # reward model also avoids overlapping multiple inference graphs on
+        # the same device.
+        for start in range(0, len(prompt_batch), batch_size):
+            batch_prompts = prompt_batch[start : start + batch_size]
+            batch_answers = answer_batch[start : start + batch_size]
+            reward_scores = self._score_reward_model(
+                batch_prompts,
+                batch_answers,
+                max_length=max_length,
+            )
+            batch_scores = [float(score) for score in reward_scores]
 
-            for index, probability in enumerate(probabilities):
-                probability = float(probability)
-                if (
-                    not math.isfinite(probability)
-                    or probability < 0.0
-                    or probability > 1.0
-                ):
+            # Penalize high undesirable-class probabilities in this batch.
+            for entry in self.classifiers:
+                classifier_name = entry["name"]
+                probabilities = entry["classifier"].predict_proba(
+                    batch_prompts,
+                    batch_answers,
+                )
+                if len(probabilities) != len(batch_scores):
                     raise ValueError(
-                        f"Classifier '{classifier_name}' returned invalid "
-                        f"probability {probability} at index {index}"
+                        f"Classifier '{classifier_name}' returned "
+                        f"{len(probabilities)} probabilities for "
+                        f"{len(batch_scores)} inputs"
                     )
 
-                safe_probability = min(probability, 1.0 - epsilon)
-                combined_scores[index] += math.log1p(-safe_probability)
+                for index, probability in enumerate(probabilities):
+                    probability = float(probability)
+                    if (
+                        not math.isfinite(probability)
+                        or probability < 0.0
+                        or probability > 1.0
+                    ):
+                        raise ValueError(
+                            f"Classifier '{classifier_name}' returned invalid "
+                            f"probability {probability} at index "
+                            f"{start + index}"
+                        )
+
+                    safe_probability = min(probability, 1.0 - epsilon)
+                    batch_scores[index] += math.log1p(-safe_probability)
+
+            combined_scores.extend(batch_scores)
 
         logger.debug(
             "%s: Combined reward scores: %s",
@@ -334,7 +354,12 @@ class RewardModel(ScoreModel):
 
 
 
-    def score_policy(self, policy:PolicyModel) -> None:
+    def score_policy(
+        self,
+        policy: PolicyModel,
+        batch_size: int = 1,
+        max_length: int = 2_048,
+    ) -> None:
         if policy.dataset is None:
             raise ValueError("The policy doesn't contain a dataset")
         column_names = (
@@ -355,7 +380,12 @@ class RewardModel(ScoreModel):
         prompts = policy.get_dataset_col(prompt_column)
         answers = policy.get_dataset_col("answers")
         
-        scores = self.score(prompts, answers)
+        scores = self.score(
+            prompts,
+            answers,
+            batch_size=batch_size,
+            max_length=max_length,
+        )
         
         policy.add_scores(scores, self.model_mode)
         
