@@ -188,7 +188,7 @@ class PolicyModel(GenerateModel):
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
 
-
+        logger.info("Starting to generate new answers to the prompts")
         prompts = dataset["prompts"]
         answers: list[str] = []
 
