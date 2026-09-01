@@ -4,7 +4,6 @@ from typing import Any
 
 import torch
 from torch.utils.data import Dataset
-from typing import Sequence
 from transformers import AutoTokenizer
 
 
@@ -14,13 +13,22 @@ logger = logging.getLogger(__name__)
 
 class RequestDataset(Dataset):
     
-    def __init__(self, requests: list[str], tokenizer_name: str, dic:dict = {}, do_dict: bool = False) -> None:
+    def __init__(
+        self,
+        requests: list[str],
+        tokenizer_name: str,
+        dic: dict[str, list[Any]] | None = None,
+        do_dict: bool = False,
+    ) -> None:
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
         if do_dict is True:
 
+            if dic is None:
+                raise ValueError("Invalid dictionary to init the class")
             if "prompts" not in dic:
                 raise ValueError("Invalid dictionary to init the class")
-            self.columns = dic
+            self.columns = {name: list(values) for name, values in dic.items()}
 
         else:
             if not isinstance(requests, list):
@@ -28,8 +36,6 @@ class RequestDataset(Dataset):
             if not all(isinstance(request, str) for request in requests):
                 raise TypeError("all requests must be strings")
 
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-            self.columns = dic
             self.columns = {
                 "prompts" : [],
             }
@@ -120,6 +126,15 @@ class RequestDataset(Dataset):
         if not isinstance(dic["prompts"], list):
             raise ValueError("the values for prompts must be a list")
 
+        prompt_count = len(dic["prompts"])
+        for name, values in dic.items():
+            if not isinstance(values, list):
+                raise ValueError(f"the values for {name} must be a list")
+            if len(values) != prompt_count:
+                raise ValueError(
+                    f"column {name} has {len(values)} items, expected {prompt_count}"
+                )
+
         return cls([], tokenizer_name, dic, True)
         
         
@@ -138,10 +153,14 @@ class RequestDataset(Dataset):
         return False
         
 
-    def add_column(self, name: str, prompts: Sequence[str], tokenizer_name):
+    def add_column(self, name: str, items: list, tokenizer_name):
+        if len(items) != len(self):
+            raise ValueError(
+                f"column {name} has {len(items)} items, expected {len(self)}"
+            )
 
         new_dict = self.columns.copy()
-        new_dict[name] = prompts
+        new_dict[name] = list(items)
         return RequestDataset.from_dict(new_dict, tokenizer_name)
 
     
@@ -154,6 +173,9 @@ class RequestDataset(Dataset):
 
     def __len__(self):
         return len(self.columns["prompts"])
+
+    def __contains__(self, name: object) -> bool:
+        return isinstance(name, str) and name in self.columns
     
     
     def __getitem__(self, index) -> Any:

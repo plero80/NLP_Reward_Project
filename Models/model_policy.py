@@ -4,8 +4,8 @@ from transformers import (
 )
 from typing import Any, Protocol, cast
 import torch
+from datasets import Dataset as HFDataset
 from peft import TaskType, get_peft_model
-from torch.utils.data import Dataset
 
 
 from Datasets.dataset_request import RequestDataset
@@ -75,7 +75,7 @@ class PolicyModel(GenerateModel):
         # Pylance-compatible common type.
         self.model = cast(_CausalLanguageModel, model)
         self.model.to(current_device())
-        self.dataset = []
+        self.dataset: RequestDataset | HFDataset | None = None
 
 
     def save(self, path: str) -> None:
@@ -160,39 +160,66 @@ class PolicyModel(GenerateModel):
         
     
     def add_scores(self, scores: list[float], reward_name: str) -> None:
-        self.dataset.add_column(reward_name, scores, self.model_name)
+        if self.dataset is None:
+            raise ValueError("The policy doesn't contain a dataset")
+        if isinstance(self.dataset, RequestDataset):
+            self.dataset = self.dataset.add_column(
+                reward_name,
+                scores,
+                self.model_name,
+            )
+        else:
+            if reward_name in self.dataset.column_names:
+                self.dataset = self.dataset.remove_columns(reward_name)
+            self.dataset = self.dataset.add_column(reward_name, scores)
     
         
     def get_dataset_col(self, name) -> list:
-        return self.dataset.get(name)
+        if self.dataset is None:
+            raise ValueError("The policy doesn't contain a dataset")
+        if isinstance(self.dataset, RequestDataset):
+            return self.dataset.get(name)
+        return list(self.dataset[name])
         
         
         
     @classmethod
     def _check_valid_dataset(cls, dataset) -> None:
-        if not isinstance(dataset, RequestDataset):
-            raise TypeError("Invalid dataset type. Type needed: RequestDataset")
-        
-        
-        if not dataset.column_name_exists("prompts"):
-            raise ValueError("The dataset must contain column: prompts")
+        if isinstance(dataset, RequestDataset):
+            if not dataset.column_name_exists("prompts"):
+                raise ValueError("The dataset must contain column: prompts")
+            return
+
+        if isinstance(dataset, HFDataset):
+            if "prompt" not in dataset.column_names and "prompts" not in dataset.column_names:
+                raise ValueError("The dataset must contain column: prompt or prompts")
+            return
+
+        raise TypeError("Invalid dataset type. Type needed: RequestDataset or Dataset")
         
     
     
     def generate_new_dataset(
         self,
-        dataset: Dataset,
+        dataset: RequestDataset | HFDataset,
         batch_size: int = 8,
-    ) -> None:
+    ) -> RequestDataset | HFDataset:
         """Put a new updated intance of dataset inside dataset field"""
+        PolicyModel._check_valid_dataset(dataset)
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
 
         logger.info("Starting to generate new answers to the prompts")
-        prompts = dataset["prompts"]
+        prompt_column = (
+            "prompts"
+            if isinstance(dataset, RequestDataset) or "prompts" in dataset.column_names
+            else "prompt"
+        )
+        prompts = dataset[prompt_column]
         answers: list[str] = []
 
-        total_batch_size = len(dataset.get("prompts")) // batch_size
+        total_batches = (len(prompts) + batch_size - 1) // batch_size
+        progress_interval = max(1, total_batches // 4)
         count_batch = 0
         
         for start in range(0, len(prompts), batch_size):
@@ -203,18 +230,26 @@ class PolicyModel(GenerateModel):
             answers.extend(self.generate_batch(prompt_batch))
             
             
-            if count_batch == 0:
-                logger.debug("Policy batch generated %s / %s", count_batch, total_batch_size)
+            count_batch += 1
+            if count_batch % progress_interval == 0 or count_batch == total_batches:
+                logger.debug(
+                    "Policy batch generated %s / %s",
+                    count_batch,
+                    total_batches,
+                )
             
-            count_batch = (count_batch + 1) % (total_batch_size // 8)
-            
-
         if len(answers) != len(dataset):
             raise RuntimeError(
                 "generation must return exactly one answer for every prompt"
             )
 
-        self.dataset = dataset.add_column("answers", answers, self.model_name)
+        if isinstance(dataset, RequestDataset):
+            self.dataset = dataset.add_column("answers", answers, self.model_name)
+        else:
+            if "answers" in dataset.column_names:
+                dataset = dataset.remove_columns("answers")
+            self.dataset = dataset.add_column("answers", answers)
+        return self.dataset
         
         
     @staticmethod

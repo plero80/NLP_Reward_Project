@@ -332,13 +332,32 @@ class RewardModel(ScoreModel):
 
 
     def score_policy(self, policy:PolicyModel) -> None:
+        if policy.dataset is None:
+            raise ValueError("The policy doesn't contain a dataset")
+        column_names = (
+            policy.dataset.column_names
+            if hasattr(policy.dataset, "column_names")
+            else list(policy.dataset.columns)
+        )
+        prompt_column = (
+            "prompts"
+            if "prompts" in column_names
+            else "prompt"
+            if "prompt" in column_names
+            else None
+        )
+        if prompt_column is None:
+            raise ValueError("The policy dataset must contain prompt or prompts")
         
-        prompts = policy.get_dataset_col("prompts")
+        prompts = policy.get_dataset_col(prompt_column)
         answers = policy.get_dataset_col("answers")
         
         scores = self.score(prompts, answers)
         
         policy.add_scores(scores, self.model_mode)
         
-        assert self.model_mode in policy.dataset
+        if hasattr(policy.dataset, "column_names"):
+            assert self.model_mode in policy.dataset.column_names
+        else:
+            assert self.model_mode in policy.dataset.columns
         assert len(policy.get_dataset_col(self.model_mode)) > 0

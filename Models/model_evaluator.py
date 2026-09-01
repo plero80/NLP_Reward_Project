@@ -10,7 +10,6 @@ from pydantic import BaseModel
 from typing import Literal
 from collections.abc import Sequence
 from Models.model_policy import PolicyModel
-from Datasets.dataset_request import RequestDataset
 import re
 
 
@@ -165,6 +164,9 @@ Determine whether the candidate assistant response is appropriate.
 
     async def __call__(self, *args, **kwargs):
         return await self.response(*args, **kwargs)
+
+
+EvaluatorModel = EvaluatorOpenAIModel
     
     
     
@@ -353,15 +355,30 @@ class PrometheusEvaluator:
         if policy.dataset is None:
             raise ValueError("The policy doesn't contain dataset to be evaluate with")
         
-        if "prompts" not in policy.dataset.columns:
+        dataset = policy.dataset
+        column_names = (
+            dataset.column_names
+            if isinstance(dataset, Dataset)
+            else list(dataset.columns)
+        )
+        prompt_column = (
+            "prompts"
+            if "prompts" in column_names
+            else "prompt"
+            if "prompt" in column_names
+            else None
+        )
+        if prompt_column is None:
             raise ValueError("The policy doesn't contain valid dataset")
         
-        if "answers" not in policy.dataset.columns or reset == True:
-            policy.generate_new_dataset()
+        if "answers" not in column_names or reset == True:
+            dataset = policy.generate_new_dataset(dataset)
             
 
-
-        scores = self.score_batch(policy.get_dataset_col("prompts"), policy.get_dataset_col("answers"))
+        scores = self.score_batch(
+            policy.get_dataset_col(prompt_column),
+            policy.get_dataset_col("answers"),
+        )
         if not scores:
             raise ValueError("cannot evaluate an empty batch")
 
