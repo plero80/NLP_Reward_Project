@@ -264,10 +264,8 @@ class PrometheusEvaluator:
         )
 
         if match is None:
-            raise ValueError(
-                f"Could not extract Prometheus score.\n"
-                f"Model output:\n{result}"
-            )
+            logger.error("Evaluation extraction: The model didn't extract a number")
+            return 1
 
         return int(match.group(1))
 
