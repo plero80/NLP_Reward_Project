@@ -4,6 +4,7 @@ from typing import Any
 
 import torch
 from torch.utils.data import Dataset
+from typing import Sequence
 from transformers import AutoTokenizer
 
 
@@ -13,17 +14,27 @@ logger = logging.getLogger(__name__)
 
 class RequestDataset(Dataset):
     
-    def __init__(self, requests: list[str], tokenizer_name: str) -> None:
-        
-        if not isinstance(requests, list):
-            raise TypeError(f"Expected list but got: {type(requests)}")
-        if not all(isinstance(request, str) for request in requests):
-            raise TypeError("all requests must be strings")
+    def __init__(self, requests: list[str], tokenizer_name: str, dic:dict = {}, do_dict: bool = False) -> None:
 
-        self.ds: list[str] = list(requests)
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-        
-        
+        if do_dict is True:
+
+            if "prompts" not in dic:
+                raise ValueError("Invalid dictionary to init the class")
+            self.columns = dic
+
+        else:
+            if not isinstance(requests, list):
+                raise TypeError(f"Expected list but got: {type(requests)}")
+            if not all(isinstance(request, str) for request in requests):
+                raise TypeError("all requests must be strings")
+
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+            self.columns = dic
+            self.columns = {
+                "prompts" : [],
+            }
+
+            self.columns["prompts"] = list(requests)
     
     
     @classmethod
@@ -85,29 +96,52 @@ class RequestDataset(Dataset):
         return cls.from_processed(loaded, tokenizer_name)
 
     def save(self, path):
-        torch.save(self.ds, path)
+        torch.save(self.columns["prompts"], path)
         
         
     def get(self, start:int, end:int) -> list[str]:
-        return self.ds[start:end]
+        return self.columns["prompts"][start:end]
 
+    @classmethod
+    def from_dict(cls, dic: dict, tokenizer_name: str):
+        """Assuming that list given already filtered"""
 
+        if "prompts" not in dic:
+            raise ValueError(""" Have to contain "prompts" as keys  """)
+
+        if not isinstance(dic["prompts"], list):
+            raise ValueError("the values for prompts must be a list")
+
+        return cls([], tokenizer_name, dic, True)
+        
+
+    def add_column(self, name: str, prompts: Sequence[str], tokenizer_name):
+
+        new_dict = self.columns.copy()
+        new_dict[name] = prompts
+        return RequestDataset.from_dict(new_dict, tokenizer_name)
 
     
     def truncate(self, start:int, end:int) -> None:
-        self.ds = self.ds[start: end]
+        self.columns["prompts"] = self.columns["prompts"][start: end]
     
 
     def __repr__(self):
         return f"{self.__class__.__name__}(size={len(self)})"
 
     def __len__(self):
-        return len(self.ds)
+        return len(self.columns["prompts"])
     
     
     def __getitem__(self, index) -> Any:
+
+        if isinstance(index, str):
+            if index not in self.columns:
+                raise ValueError("Key isnt't exists")
+
+            return self.columns[index]
         
-        prompt = self.ds[index]
+        prompt = self.columns["prompts"][index]
         
         encoded = self.tokenizer(
             prompt,

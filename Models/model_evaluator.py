@@ -9,6 +9,8 @@ from openai import AsyncOpenAI, RateLimitError
 from pydantic import BaseModel
 from typing import Literal
 from collections.abc import Sequence
+from Models.model_policy import PolicyModel
+from Datasets.dataset_request import RequestDataset
 import re
 
 
@@ -348,6 +350,20 @@ class PrometheusEvaluator:
 
     def evaluate(self, prompts: Sequence[str], answers: Sequence[str]) -> float:
         
+        scores = self.score_batch(prompts, answers)
+        if not scores:
+            raise ValueError("cannot evaluate an empty batch")
+
+        return sum(scores) / len(scores)
+
+
+    def eval(self, policy: PolicyModel, dataset: RequestDataset) -> float:
+
+
+        prompts = dataset.ds
+
+        answers = policy.generate_batch(prompts)
+
         scores = self.score_batch(prompts, answers)
         if not scores:
             raise ValueError("cannot evaluate an empty batch")

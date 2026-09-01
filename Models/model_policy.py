@@ -162,20 +162,10 @@ class PolicyModel(GenerateModel):
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
 
-        if "answers" in dataset.column_names:
+        if "answers" in dataset.columns:
             raise ValueError("dataset already contains an 'answers' column")
 
-        prompt_column = (
-            "prompt"
-            if "prompt" in dataset.column_names
-            else "prompts"
-            if "prompts" in dataset.column_names
-            else None
-        )
-        if prompt_column is None:
-            raise ValueError("dataset must contain a 'prompt' or 'prompts' column")
-
-        prompts = dataset[prompt_column]
+        prompts = dataset["prompts"]
         answers: list[str] = []
 
         for start in range(0, len(prompts), batch_size):
