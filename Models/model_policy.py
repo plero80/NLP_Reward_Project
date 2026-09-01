@@ -4,7 +4,7 @@ from transformers import (
 )
 from typing import Any, Protocol, cast
 import torch
-from datasets import Dataset as HFDataset
+from datasets import Dataset as HFDataset, DatasetDict
 from peft import TaskType, get_peft_model
 
 
@@ -162,7 +162,7 @@ class PolicyModel(GenerateModel):
     def add_scores(self, scores: list[float], reward_name: str) -> None:
         if self.dataset is None:
             raise ValueError("The policy doesn't contain a dataset")
-        if isinstance(self.dataset, RequestDataset):
+        if PolicyModel._is_request_dataset_like(self.dataset):
             self.dataset = self.dataset.add_column(
                 reward_name,
                 scores,
@@ -177,44 +177,65 @@ class PolicyModel(GenerateModel):
     def get_dataset_col(self, name) -> list:
         if self.dataset is None:
             raise ValueError("The policy doesn't contain a dataset")
-        if isinstance(self.dataset, RequestDataset):
+        if PolicyModel._is_request_dataset_like(self.dataset):
             return self.dataset.get(name)
         return list(self.dataset[name])
         
         
+    @staticmethod
+    def _is_request_dataset_like(dataset: object) -> bool:
+        return all(
+            hasattr(dataset, name)
+            for name in ("columns", "column_name_exists", "get", "add_column")
+        )
+
+    @staticmethod
+    def _prompt_column(dataset: object) -> str:
+        if PolicyModel._is_request_dataset_like(dataset):
+            if dataset.column_name_exists("prompts"):
+                return "prompts"
+            raise ValueError("The dataset must contain column: prompts")
+
+        if isinstance(dataset, HFDataset):
+            if "prompts" in dataset.column_names:
+                return "prompts"
+            if "prompt" in dataset.column_names:
+                return "prompt"
+            raise ValueError("The dataset must contain column: prompt or prompts")
+
+        raise TypeError(
+            "Invalid dataset type. Type needed: RequestDataset, "
+            "datasets.Dataset, or datasets.DatasetDict with a train split"
+        )
+
+    @staticmethod
+    def _normalize_dataset(dataset: object) -> object:
+        if isinstance(dataset, DatasetDict):
+            if "train" not in dataset:
+                raise ValueError("DatasetDict must contain a train split")
+            return dataset["train"]
+        return dataset
+        
         
     @classmethod
     def _check_valid_dataset(cls, dataset) -> None:
-        if isinstance(dataset, RequestDataset):
-            if not dataset.column_name_exists("prompts"):
-                raise ValueError("The dataset must contain column: prompts")
-            return
-
-        if isinstance(dataset, HFDataset):
-            if "prompt" not in dataset.column_names and "prompts" not in dataset.column_names:
-                raise ValueError("The dataset must contain column: prompt or prompts")
-            return
-
-        raise TypeError("Invalid dataset type. Type needed: RequestDataset or Dataset")
+        cls._prompt_column(cls._normalize_dataset(dataset))
         
     
     
     def generate_new_dataset(
         self,
-        dataset: RequestDataset | HFDataset,
+        dataset: RequestDataset | HFDataset | DatasetDict,
         batch_size: int = 8,
     ) -> RequestDataset | HFDataset:
         """Put a new updated intance of dataset inside dataset field"""
+        dataset = PolicyModel._normalize_dataset(dataset)
         PolicyModel._check_valid_dataset(dataset)
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
 
         logger.info("Starting to generate new answers to the prompts")
-        prompt_column = (
-            "prompts"
-            if isinstance(dataset, RequestDataset) or "prompts" in dataset.column_names
-            else "prompt"
-        )
+        prompt_column = PolicyModel._prompt_column(dataset)
         prompts = dataset[prompt_column]
         answers: list[str] = []
 
@@ -243,7 +264,7 @@ class PolicyModel(GenerateModel):
                 "generation must return exactly one answer for every prompt"
             )
 
-        if isinstance(dataset, RequestDataset):
+        if PolicyModel._is_request_dataset_like(dataset):
             self.dataset = dataset.add_column("answers", answers, self.model_name)
         else:
             if "answers" in dataset.column_names:
