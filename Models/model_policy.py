@@ -2,13 +2,16 @@ from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
 )
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeGuard, cast
 import torch
 from datasets import Dataset as HFDataset, DatasetDict
 from peft import TaskType, get_peft_model
 
 
 from Datasets.dataset_request import RequestDataset
+from Datasets.dataset_classifier import DatasetClassifier
+
+
 from Models.models import GenerateModel
 from Models.lora import LoRASettings
 from Models.runtime import best_dtype, current_device
@@ -19,6 +22,9 @@ from collections.abc import Sequence
 
 logger = logging.getLogger(__name__)
 NAME = "Policy Model"
+
+DatasetInput = RequestDataset | HFDataset | DatasetDict
+NormalizedDataset = RequestDataset | HFDataset
 
 
 class _CausalLanguageModel(Protocol):
@@ -75,7 +81,7 @@ class PolicyModel(GenerateModel):
         # Pylance-compatible common type.
         self.model = cast(_CausalLanguageModel, model)
         self.model.to(current_device())
-        self.dataset: RequestDataset | HFDataset | None = None
+        self.dataset: RequestDataset | None = None
 
 
     def save(self, path: str) -> None:
@@ -152,7 +158,7 @@ class PolicyModel(GenerateModel):
         return answers
     
     
-    def set_dataset(self, dataset, batch_size = 8) -> None:
+    def set_dataset(self, dataset: DatasetInput, batch_size: int = 8) -> None:
         """Update the answers of the model inside the dataset"""
         
         PolicyModel._check_valid_dataset(dataset)
@@ -168,10 +174,7 @@ class PolicyModel(GenerateModel):
                 scores,
                 self.model_name,
             )
-        else:
-            if reward_name in self.dataset.column_names:
-                self.dataset = self.dataset.remove_columns(reward_name)
-            self.dataset = self.dataset.add_column(reward_name, scores)
+        
     
         
     def get_dataset_col(self, name) -> list:
@@ -183,7 +186,7 @@ class PolicyModel(GenerateModel):
         
         
     @staticmethod
-    def _is_request_dataset_like(dataset: object) -> bool:
+    def _is_request_dataset_like(dataset: object) -> TypeGuard[RequestDataset]:
         return all(
             hasattr(dataset, name)
             for name in ("columns", "column_name_exists", "get", "add_column")
@@ -209,7 +212,7 @@ class PolicyModel(GenerateModel):
         )
 
     @staticmethod
-    def _normalize_dataset(dataset: object) -> object:
+    def _normalize_dataset(dataset: DatasetInput) -> NormalizedDataset:
         if isinstance(dataset, DatasetDict):
             if "train" not in dataset:
                 raise ValueError("DatasetDict must contain a train split")
@@ -218,18 +221,49 @@ class PolicyModel(GenerateModel):
         
         
     @classmethod
-    def _check_valid_dataset(cls, dataset) -> None:
+    def _check_valid_dataset(cls, dataset: DatasetInput) -> None:
         cls._prompt_column(cls._normalize_dataset(dataset))
         
+        
+    
+    def generate_dataset_classifier(self, theta) -> DatasetClassifier:
+        
+        if self.dataset is None:
+            raise ValueError("dataset is None")
+        
+        
+        if not all(list(map(self.dataset.column_name_exists, ["proxy","judge","prompts","answers"]))):
+            raise ValueError("Invalid dataset for creating dataset for classifier")
+        
+
+        else:
+            prompts = self.get_dataset_col("prompts")
+            answers = self.get_dataset_col("answers")
+            proxy_scores = self.get_dataset_col("proxy")
+            judge_scores = self.get_dataset_col("judge")
+            
+            dataset_classifier = DatasetClassifier(theta)
+            dataset_classifier.add(prompts, answers, proxy_scores, judge_scores)
+        
+        return dataset_classifier
+    
     
     
     def generate_new_dataset(
         self,
-        dataset: RequestDataset | HFDataset | DatasetDict = self.dataset,
+        dataset: DatasetInput | None = None,
         batch_size: int = 8,
-    ) -> RequestDataset | HFDataset:
+    ) -> RequestDataset | HFDataset | None:
         """Put a new updated intance of dataset inside dataset field"""
+        if dataset is None:
+            dataset = self.dataset
+        if dataset is None:
+            raise ValueError("The policy doesn't contain a dataset")
+
         dataset = PolicyModel._normalize_dataset(dataset)
+        dataset = RequestDataset.reset(dataset) # Delete all scores because of new answers.
+        
+        
         PolicyModel._check_valid_dataset(dataset)
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
@@ -266,10 +300,7 @@ class PolicyModel(GenerateModel):
 
         if PolicyModel._is_request_dataset_like(dataset):
             self.dataset = dataset.add_column("answers", answers, self.model_name)
-        else:
-            if "answers" in dataset.column_names:
-                dataset = dataset.remove_columns("answers")
-            self.dataset = dataset.add_column("answers", answers)
+        
         return self.dataset
         
         

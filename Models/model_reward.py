@@ -134,8 +134,10 @@ class RewardModel(ScoreModel):
         self.mean = None
         
         
-    def init_normalization(self, prompts: Sequence[str], answers: Sequence[str]) -> None:
+    def init_normalization(self,policy: PolicyModel) -> None:
         
+        prompts = policy.get_dataset_col("prompts")
+        answers = policy.get_dataset_col("answers")
         scores = self.score(prompts, answers)
         scores = torch.as_tensor(scores, dtype=torch.float32)
 

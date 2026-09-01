@@ -5,7 +5,7 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
-
+from datasets import Dataset as HFDataset, DatasetDict
 
 
 
@@ -21,6 +21,7 @@ class RequestDataset(Dataset):
         do_dict: bool = False,
     ) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer_name = tokenizer_name
 
         if do_dict is True:
 
@@ -39,9 +40,8 @@ class RequestDataset(Dataset):
             self.columns = {
                 "prompts" : [],
             }
-
+            
             self.columns["prompts"] = list(requests)
-    
     
     
     
@@ -137,6 +137,17 @@ class RequestDataset(Dataset):
 
         return cls([], tokenizer_name, dic, True)
         
+        
+    @classmethod
+    def reset(cls, dataset):
+        if not isinstance(dataset, RequestDataset):
+            raise TypeError("Invalid dataset. Needs to be with type RequestDataset")
+        
+        if not dataset.column_name_exists("prompts") :
+            raise ValueError("Have to contrain column prompts")
+        
+        
+        return cls.from_processed(dataset.columns["prompts"], dataset.tokenizer_name)
         
         
     def get(self, name: str) -> list[str]:
