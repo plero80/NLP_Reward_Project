@@ -138,6 +138,7 @@ class RewardModel(ScoreModel):
         
         prompts = policy.get_dataset_col("prompts")
         answers = policy.get_dataset_col("answers")
+        
         scores = self.score(prompts, answers)
         scores = torch.as_tensor(scores, dtype=torch.float32)
 
