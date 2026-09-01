@@ -352,6 +352,8 @@ class PrometheusEvaluator:
 
     def evaluate(self, policy: PolicyModel, reset = False) -> float:
         
+        logger.info("Starting evaluation")
+        
         if policy.dataset is None:
             raise ValueError("The policy doesn't contain dataset to be evaluate with")
         
