@@ -1,6 +1,6 @@
 from Models.models import ScoreModel, BinaryClassifier
 from Models.model_classifier import Classifier
-
+from Models.model_policy import PolicyModel
 
 from transformers import (
     AutoTokenizer,
@@ -328,3 +328,17 @@ class RewardModel(ScoreModel):
             
             
         return combined_scores
+
+
+
+    def score_policy(self, policy:PolicyModel) -> None:
+        
+        prompts = policy.get_dataset_col("prompts")
+        answers = policy.get_dataset_col("answers")
+        
+        scores = self.score(prompts, answers)
+        
+        policy.add_scores(scores, self.model_mode)
+        
+        assert self.model_mode in policy.dataset
+        assert len(policy.get_dataset_col(self.model_mode)) > 0

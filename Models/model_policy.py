@@ -8,7 +8,7 @@ from peft import TaskType, get_peft_model
 from torch.utils.data import Dataset
 
 
-
+from Datasets.dataset_request import RequestDataset
 from Models.models import GenerateModel
 from Models.lora import LoRASettings
 from Models.runtime import best_dtype, current_device
@@ -75,7 +75,7 @@ class PolicyModel(GenerateModel):
         # Pylance-compatible common type.
         self.model = cast(_CausalLanguageModel, model)
         self.model.to(current_device())
-
+        self.dataset = []
 
 
     def save(self, path: str) -> None:
@@ -152,18 +152,42 @@ class PolicyModel(GenerateModel):
         return answers
     
     
+    def set_dataset(self, dataset, batch_size = 8) -> None:
+        """Update the answers of the model inside the dataset"""
+        
+        PolicyModel._check_valid_dataset(dataset)
+        self.generate_new_dataset(dataset, batch_size)
+        
+    
+    def add_scores(self, scores: list[floats], reward_name: str) -> None:
+        self.dataset.add_column(reward_name, scores, self.model_name)
+    
+        
+    def get_dataset_col(self, name) -> list:
+        return self.dataset.get(name)
+        
+        
+        
+    @classmethod
+    def _check_valid_dataset(cls, dataset) -> None:
+        if not isinstance(dataset, RequestDataset):
+            raise TypeError("Invalid dataset type. Type needed: RequestDataset")
+        
+        
+        if not dataset.column_name_exists("prompts"):
+            raise ValueError("The dataset must contain column: prompts")
+        
+    
     
     def generate_new_dataset(
         self,
         dataset: Dataset,
         batch_size: int = 8,
-    ) -> Dataset:
-        """Return a copy of ``dataset`` with generated ``answers``."""
+    ) -> None:
+        """Put a new updated intance of dataset inside dataset field"""
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
 
-        if "answers" in dataset.columns:
-            raise ValueError("dataset already contains an 'answers' column")
 
         prompts = dataset["prompts"]
         answers: list[str] = []
@@ -180,7 +204,7 @@ class PolicyModel(GenerateModel):
                 "generation must return exactly one answer for every prompt"
             )
 
-        return dataset.add_column("answers", answers)
+        self.dataset = dataset.add_column("answers", answers, self.model_name)
         
         
     @staticmethod

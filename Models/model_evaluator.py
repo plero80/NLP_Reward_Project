@@ -348,24 +348,22 @@ class PrometheusEvaluator:
     
     
 
-    def evaluate(self, prompts: Sequence[str], answers: Sequence[str]) -> float:
+    def evaluate(self, policy: PolicyModel, reset = False) -> float:
         
-        scores = self.score_batch(prompts, answers)
+        if policy.dataset is None:
+            raise ValueError("The policy doesn't contain dataset to be evaluate with")
+        
+        if "prompts" not in policy.dataset.columns:
+            raise ValueError("The policy doesn't contain valid dataset")
+        
+        if "answers" not in policy.dataset.columns or reset = True:
+            policy.generate_new_dataset()
+            
+            
+        dataset = policy.dataset
+        scores = self.score_batch(dataset.get("prompts"), dataset.get("answers"))
         if not scores:
             raise ValueError("cannot evaluate an empty batch")
 
         return sum(scores) / len(scores)
 
-
-    def _eval(self, policy: PolicyModel, dataset: RequestDataset) -> float:
-
-
-        prompts = dataset.ds
-
-        answers = policy.generate_batch(prompts)
-
-        scores = self.score_batch(prompts, answers)
-        if not scores:
-            raise ValueError("cannot evaluate an empty batch")
-
-        return sum(scores) / len(scores)

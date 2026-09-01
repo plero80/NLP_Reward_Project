@@ -37,6 +37,8 @@ class RequestDataset(Dataset):
             self.columns["prompts"] = list(requests)
     
     
+    
+    
     @classmethod
     def from_raw(cls, ds: Dataset , tokenizer_name: str):
         requests = []
@@ -113,6 +115,21 @@ class RequestDataset(Dataset):
             raise ValueError("the values for prompts must be a list")
 
         return cls([], tokenizer_name, dic, True)
+        
+        
+        
+    def get(self, name: str) -> list[str]:
+        if name not in self.columns:
+            raise ValueError("Invalid query")
+        
+        return self.columns[name]
+    
+    
+    def column_name_exists(self, name: str) -> bool:
+        if name in self.columns:
+                return True   
+            
+        return False
         
 
     def add_column(self, name: str, prompts: Sequence[str], tokenizer_name):
