@@ -359,9 +359,9 @@ class PrometheusEvaluator:
         if "answers" not in policy.dataset.columns or reset == True:
             policy.generate_new_dataset()
             
-            
-        dataset = policy.dataset
-        scores = self.score_batch(dataset.get("prompts"), dataset.get("answers"))
+
+
+        scores = self.score_batch(policy.get_dataset_col("prompts"), policy.get_dataset_col("answers"))
         if not scores:
             raise ValueError("cannot evaluate an empty batch")
 

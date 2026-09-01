@@ -101,8 +101,14 @@ class RequestDataset(Dataset):
         torch.save(self.columns["prompts"], path)
         
         
-    def get(self, start:int, end:int) -> list[str]:
-        return self.columns["prompts"][start:end]
+    def get_list(self,name: str, start:int, end:int) -> list[str]:
+        
+        if self.column_name_exists(name):
+            return self.columns[name][start : end]
+
+        else:
+            raise ValueError("Column name doesn't exists")
+
 
     @classmethod
     def from_dict(cls, dic: dict, tokenizer_name: str):

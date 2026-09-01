@@ -198,6 +198,11 @@ class PolicyModel(GenerateModel):
                 raise TypeError("all prompts must be strings")
             prompt_batch = cast(list[str], raw_prompt_batch)
             answers.extend(self.generate_batch(prompt_batch))
+            
+            
+            if len(dataset) % len(answers) == 0:
+                logger.debug("Policy generated %s / %s", len(dataset), len(answers))
+            
 
         if len(answers) != len(dataset):
             raise RuntimeError(
