@@ -192,6 +192,9 @@ class PolicyModel(GenerateModel):
         prompts = dataset["prompts"]
         answers: list[str] = []
 
+        total_batch_size = len(dataset.get("prompts")) // batch_size
+        count_batch = 0
+        
         for start in range(0, len(prompts), batch_size):
             raw_prompt_batch = list(prompts[start : start + batch_size])
             if not all(isinstance(prompt, str) for prompt in raw_prompt_batch):
@@ -200,8 +203,10 @@ class PolicyModel(GenerateModel):
             answers.extend(self.generate_batch(prompt_batch))
             
             
-            if len(dataset) % len(answers) == 0:
-                logger.debug("Policy generated %s / %s", len(dataset), len(answers))
+            if count_batch == 0:
+                logger.debug("Policy batch generated %s / %s", count_batch, total_batch_size)
+            
+            count_batch = (count_batch + 1) % (total_batch_size // 8)
             
 
         if len(answers) != len(dataset):
