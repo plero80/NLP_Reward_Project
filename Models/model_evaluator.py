@@ -357,7 +357,7 @@ class PrometheusEvaluator:
         return sum(scores) / len(scores)
 
 
-    def eval(self, policy: PolicyModel, dataset: RequestDataset) -> float:
+    def _eval(self, policy: PolicyModel, dataset: RequestDataset) -> float:
 
 
         prompts = dataset.ds
