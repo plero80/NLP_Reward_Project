@@ -159,7 +159,7 @@ class PolicyModel(GenerateModel):
         self.generate_new_dataset(dataset, batch_size)
         
     
-    def add_scores(self, scores: list[floats], reward_name: str) -> None:
+    def add_scores(self, scores: list[float], reward_name: str) -> None:
         self.dataset.add_column(reward_name, scores, self.model_name)
     
         
