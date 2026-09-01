@@ -356,7 +356,7 @@ class PrometheusEvaluator:
         if "prompts" not in policy.dataset.columns:
             raise ValueError("The policy doesn't contain valid dataset")
         
-        if "answers" not in policy.dataset.columns or reset = True:
+        if "answers" not in policy.dataset.columns or reset == True:
             policy.generate_new_dataset()
             
             
