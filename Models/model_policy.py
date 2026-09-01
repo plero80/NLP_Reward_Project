@@ -225,7 +225,7 @@ class PolicyModel(GenerateModel):
     
     def generate_new_dataset(
         self,
-        dataset: RequestDataset | HFDataset | DatasetDict,
+        dataset: RequestDataset | HFDataset | DatasetDict = self.dataset,
         batch_size: int = 8,
     ) -> RequestDataset | HFDataset:
         """Put a new updated intance of dataset inside dataset field"""
