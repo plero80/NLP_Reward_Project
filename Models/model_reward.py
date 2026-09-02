@@ -109,9 +109,20 @@ class RewardModel(ScoreModel):
         model_mode: str,
         load: bool = False,
         checkpoint: str | None = None,
+        ref_mean: float | None = None,
+        ref_std: float | None = None,
     ) -> None:
         if load and not checkpoint:
             raise ValueError("checkpoint is required when load=True")
+        if (ref_mean is None) != (ref_std is None):
+            raise ValueError("ref_mean and ref_std must be provided together")
+        if ref_mean is not None and ref_std is not None:
+            ref_mean = float(ref_mean)
+            ref_std = float(ref_std)
+            if not math.isfinite(ref_mean) or not math.isfinite(ref_std):
+                raise ValueError("Reference normalization values must be finite")
+            if ref_std <= 1e-8:
+                raise ValueError("ref_std must be greater than zero")
         model_source = checkpoint if load and checkpoint is not None else model_name
         self.base_model_prefix = model_name
         self.model_mode = model_mode
@@ -129,8 +140,8 @@ class RewardModel(ScoreModel):
         self.model.to(current_device())
         self.model.eval()
         self.classifiers: list[dict] = []
-        self.std = None
-        self.mean = None
+        self.mean = ref_mean
+        self.std = ref_std
         
         
     def init_normalization(
@@ -151,8 +162,16 @@ class RewardModel(ScoreModel):
         )
         scores = torch.as_tensor(scores, dtype=torch.float32)
 
-        self.mean = scores.mean()
-        self.std = scores.std(correction=0)
+        mean = float(scores.mean().item())
+        std = float(scores.std(correction=0).item())
+        if not math.isfinite(mean) or not math.isfinite(std):
+            raise ValueError("Normalization statistics must be finite")
+        if std <= 1e-8:
+            raise ValueError(
+                "Cannot normalize reward scores with near-zero variance"
+            )
+        self.mean = mean
+        self.std = std
         
         
         
@@ -343,11 +362,15 @@ class RewardModel(ScoreModel):
             combined_scores,
         )
         
-        if self.std is not None and self.mean is not None and normalize_score is True:
+        if normalize_score:
+            if self.std is None or self.mean is None:
+                raise RuntimeError(
+                    "Normalization requested before mean/std were configured"
+                )
             normalized_scores = (
                 torch.as_tensor(combined_scores, dtype=torch.float32)
-                - self.mean.cpu()
-            ) / (self.std.cpu() + 1e-8)
+                - float(self.mean)
+            ) / (float(self.std) + 1e-8)
             combined_scores = normalized_scores.tolist()
             
             

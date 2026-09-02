@@ -22,7 +22,7 @@ from Trainers.trainer_classifier import (
     ClassifierTrainingConfig,
 )
 from Trainers.trainer_ppo import PPOTrainingConfig, PolicyPPOTrainer
-
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ class ConfigTrainClassifier:
     score_max_length: int = 2_048
 
     classifier_model_name: str = "Qwen/Qwen3-0.6B"
-    classifier_theta: float = 2.0
+    calibration_quantile: float = 0.95
     classifier_test_size: float = 0.2
     classifier_random_state: int = 42
     classifier_output_root: str | Path = "outputs/classifiers"
@@ -155,105 +155,266 @@ def _validate_classifier_config(config: ConfigTrainClassifier) -> None:
 
     if config.classifier_epochs <= 0:
         raise ValueError("classifier_epochs must be positive")
+    if not 0.0 < config.calibration_quantile < 1.0:
+        raise ValueError("calibration_quantile must be between 0 and 1")
     if not 0.0 < config.classifier_test_size < 1.0:
         raise ValueError("classifier_test_size must be between 0 and 1")
 
 
-def create_classifier(
-    config: ConfigTrainClassifier | None = None,
-) -> Classifier:
-    """Create reward/judge labels, train a LoRA classifier, and return it."""
-    config = config or ConfigTrainClassifier()
-    _validate_classifier_config(config)
+@dataclass(frozen=True)
+class GapCalibration:
+    proxy_mean: float
+    proxy_std: float
+    judge_mean: float
+    judge_std: float
+    theta: float
 
+
+_NORMALIZATION_EPSILON = 1e-8
+PolicyRows = tuple[list[str], list[str]]
+
+
+def _validate_gap_calibration(calibration: GapCalibration) -> None:
+    values = {
+        "proxy_mean": calibration.proxy_mean,
+        "proxy_std": calibration.proxy_std,
+        "judge_mean": calibration.judge_mean,
+        "judge_std": calibration.judge_std,
+        "theta": calibration.theta,
+    }
+    for name, value in values.items():
+        if not np.isfinite(value):
+            raise ValueError(f"Calibration {name} must be finite")
+    for name in ("proxy_std", "judge_std"):
+        if values[name] <= _NORMALIZATION_EPSILON:
+            raise ValueError(f"Calibration {name} must be positive")
+
+
+def _generate_policy_rows(
+    config: ConfigTrainClassifier,
+    request_dataset: RequestDataset,
+    *,
+    reference: bool,
+    supplied_policy: PolicyModel | None = None,
+) -> PolicyRows:
     policy: PolicyModel | None = None
-    classifier_dataset: DatasetClassifier
-
     try:
-        policy = (
-            PolicyModel.load(config.policy_load_path)
-            if config.policy_load_path is not None
-            else PolicyModel(config.policy_name)
-        )
-
-        raw_dataset = load_dataset(config.dataset_name)
-        request_dataset = RequestDataset.from_raw(
-            raw_dataset,
-            policy.model_name,
-        )
-        request_dataset.truncate(
-            config.start_dataset,
-            config.end_dataset,
-        )
-        if len(request_dataset) == 0:
-            raise ValueError("The selected classifier dataset range is empty")
-
+        if supplied_policy is not None:
+            policy = supplied_policy
+        elif reference or config.policy_load_path is None:
+            policy = PolicyModel(config.policy_name)
+        else:
+            policy = PolicyModel.load(config.policy_load_path)
         policy.generate_new_dataset(
             request_dataset,
             batch_size=config.generation_batch_size,
         )
-
-        # Keep the generated rows, but make room for one scorer at a time.
-        policy.offload()
-        empty_cuda_cache()
-
-        scoring_stages = (
-            (
-                config.reward_model_name,
-                config.reward_mode_name,
-                config.reward_batch_size,
-            ),
-            (
-                config.judge_model_name,
-                config.judge_mode_name,
-                config.judge_batch_size,
-            ),
-        )
-        for model_name, mode_name, batch_size in scoring_stages:
-            scorer: RewardModel | None = None
-            try:
-                scorer = RewardModel(model_name, mode_name)
-                scorer.init_normalization(policy, batch_size)
-                
-                if mode_name == "judge":
-                    config.classifier_theta = scorer.std
-                
-                scorer.score_policy(
-                    policy,
-                    batch_size=batch_size,
-                    max_length=config.score_max_length,
-                    normalize_score = True
-                )
-            except BaseException:
-                # Notebook tracebacks may retain the failed scorer. Offload it
-                # before propagating the original exception.
-                offload_to_cpu(scorer)
-                raise
-            finally:
-                scorer = None
-                empty_cuda_cache()
-
-        classifier_dataset = DatasetClassifier(
-            theta=config.classifier_theta
-        )
-        classifier_dataset.add(
-            prompts=policy.get_dataset_col("prompts"),
-            answers=policy.get_dataset_col("answers"),
-            reward_scores=policy.get_dataset_col(config.reward_mode_name),
-            judge_scores=policy.get_dataset_col(config.judge_mode_name),
-        )
+        prompts = list(policy.get_dataset_col("prompts"))
+        answers = list(policy.get_dataset_col("answers"))
+        if len(prompts) != len(answers):
+            raise RuntimeError(
+                "Policy generation returned different prompt and answer counts"
+            )
+        if not all(isinstance(value, str) for value in prompts + answers):
+            raise TypeError("Generated prompts and answers must all be strings")
+        return prompts, answers
     except BaseException:
         offload_to_cpu(policy)
         raise
     finally:
+        if supplied_policy is not None:
+            # The caller retains this policy. Move it off CUDA before reward
+            # and judge models are loaded, but keep the object reusable.
+            supplied_policy.offload()
         policy = None
         empty_cuda_cache()
+
+
+def _finite_score_array(
+    scores: list[float],
+    *,
+    expected_size: int,
+    label: str,
+) -> np.ndarray:
+    array = np.asarray(scores, dtype=np.float64)
+    if array.shape != (expected_size,):
+        raise ValueError(
+            f"{label} returned shape {array.shape}; expected "
+            f"({expected_size},)"
+        )
+    if not np.isfinite(array).all():
+        raise ValueError(f"{label} returned a non-finite score")
+    return array
+
+
+def _score_reference_and_target(
+    *,
+    model_name: str,
+    mode_name: str,
+    batch_size: int,
+    max_length: int,
+    reference_rows: PolicyRows | None,
+    target_rows: PolicyRows,
+) -> tuple[np.ndarray | None, np.ndarray]:
+    scorer: RewardModel | None = None
+    try:
+        scorer = RewardModel(model_name, mode_name)
+        reference_scores = (
+            _finite_score_array(
+                scorer.score(
+                    reference_rows[0],
+                    reference_rows[1],
+                    batch_size=batch_size,
+                    max_length=max_length,
+                ),
+                expected_size=len(reference_rows[0]),
+                label=f"reference {mode_name}",
+            )
+            if reference_rows is not None
+            else None
+        )
+        target_scores = _finite_score_array(
+            scorer.score(
+                target_rows[0],
+                target_rows[1],
+                batch_size=batch_size,
+                max_length=max_length,
+            ),
+            expected_size=len(target_rows[0]),
+            label=f"target {mode_name}",
+        )
+        return reference_scores, target_scores
+    except BaseException:
+        offload_to_cpu(scorer)
+        raise
+    finally:
+        scorer = None
+        empty_cuda_cache()
+
+
+def _build_gap_calibration(
+    proxy_scores: np.ndarray,
+    judge_scores: np.ndarray,
+    quantile: float,
+) -> GapCalibration:
+    proxy_mean = float(proxy_scores.mean())
+    proxy_std = float(proxy_scores.std(ddof=0))
+    judge_mean = float(judge_scores.mean())
+    judge_std = float(judge_scores.std(ddof=0))
+
+    calibration_without_theta = GapCalibration(
+        proxy_mean=proxy_mean,
+        proxy_std=proxy_std,
+        judge_mean=judge_mean,
+        judge_std=judge_std,
+        theta=0.0,
+    )
+    _validate_gap_calibration(calibration_without_theta)
+
+    proxy_z = (proxy_scores - proxy_mean) / proxy_std
+    judge_z = (judge_scores - judge_mean) / judge_std
+    theta = float(np.quantile(proxy_z - judge_z, quantile))
+    calibration = GapCalibration(
+        proxy_mean=proxy_mean,
+        proxy_std=proxy_std,
+        judge_mean=judge_mean,
+        judge_std=judge_std,
+        theta=theta,
+    )
+    _validate_gap_calibration(calibration)
+    return calibration
+
+
+def create_classifier(
+    config: ConfigTrainClassifier | None = None,
+    *,
+    policy: PolicyModel | None = None,
+    calibration: GapCalibration | None = None,
+) -> tuple[Classifier, GapCalibration]:
+    """Train a classifier using a frozen reference reward-gap calibration."""
+    config = config or ConfigTrainClassifier()
+    _validate_classifier_config(config)
+    if policy is not None and config.policy_load_path is not None:
+        raise ValueError(
+            "Pass either policy or config.policy_load_path, not both"
+        )
+
+    raw_dataset = load_dataset(config.dataset_name)
+    request_dataset = RequestDataset.from_raw(
+        raw_dataset,
+        config.policy_name,
+    )
+    request_dataset.truncate(
+        config.start_dataset,
+        config.end_dataset,
+    )
+    if len(request_dataset) == 0:
+        raise ValueError("The selected classifier dataset range is empty")
+
+    reference_rows = (
+        _generate_policy_rows(
+            config,
+            request_dataset,
+            reference=True,
+        )
+        if calibration is None
+        else None
+    )
+    target_rows = _generate_policy_rows(
+        config,
+        request_dataset,
+        reference=False,
+        supplied_policy=policy,
+    )
+
+    reference_proxy, target_proxy = _score_reference_and_target(
+        model_name=config.reward_model_name,
+        mode_name=config.reward_mode_name,
+        batch_size=config.reward_batch_size,
+        max_length=config.score_max_length,
+        reference_rows=reference_rows,
+        target_rows=target_rows,
+    )
+    reference_judge, target_judge = _score_reference_and_target(
+        model_name=config.judge_model_name,
+        mode_name=config.judge_mode_name,
+        batch_size=config.judge_batch_size,
+        max_length=config.score_max_length,
+        reference_rows=reference_rows,
+        target_rows=target_rows,
+    )
+
+    if calibration is None:
+        if reference_proxy is None or reference_judge is None:
+            raise RuntimeError("Reference scores are required for calibration")
+        calibration = _build_gap_calibration(
+            reference_proxy,
+            reference_judge,
+            config.calibration_quantile,
+        )
+    else:
+        _validate_gap_calibration(calibration)
+
+    target_proxy_z = (
+        target_proxy - calibration.proxy_mean
+    ) / calibration.proxy_std
+    target_judge_z = (
+        target_judge - calibration.judge_mean
+    ) / calibration.judge_std
+
+    classifier_dataset = DatasetClassifier(theta=calibration.theta)
+    classifier_dataset.add(
+        prompts=target_rows[0],
+        answers=target_rows[1],
+        reward_scores=target_proxy_z.tolist(),
+        judge_scores=target_judge_z.tolist(),
+    )
 
     class_counts = classifier_dataset.class_counts()
     if len(class_counts) < 2:
         raise ValueError(
-            "Classifier labels contain only one class. Adjust "
-            f"classifier_theta; class counts: {class_counts}"
+            "Classifier labels contain only one class under the frozen "
+            f"calibration threshold; class counts: {class_counts}"
         )
 
     train_dataset, test_dataset = classifier_dataset.split(
@@ -280,7 +441,7 @@ def create_classifier(
         metrics = classifier_trainer.evaluate(hf_trainer, test_dataset)
         logger.info("Classifier test metrics: %s", metrics)
         classifier.model.eval()
-        return classifier
+        return classifier, calibration
     except BaseException:
         offload_to_cpu(classifier)
         raise

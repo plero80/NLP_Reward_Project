@@ -59,6 +59,25 @@ def test_score_uses_ordered_micro_batches() -> None:
     assert [len(prompts) for prompts, _ in classifier.calls] == [2, 2, 1]
 
 
+def test_score_applies_frozen_float_normalization() -> None:
+    reward = _reward_without_loading_model()
+    reward.classifiers = []
+    reward.mean = 1.0
+    reward.std = 2.0
+    reward._score_reward_model = (
+        lambda prompts, answers, max_length: [1.0, 3.0]
+    )
+
+    scores = reward.score(
+        ["p1", "p2"],
+        ["a1", "a2"],
+        batch_size=2,
+        normalize_score=True,
+    )
+
+    assert scores == pytest.approx([0.0, 1.0])
+
+
 @pytest.mark.parametrize(
     ("batch_size", "max_length", "message"),
     [

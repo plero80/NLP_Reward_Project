@@ -53,7 +53,7 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
     monkeypatch,
 ) -> None:
     prompts = ["p0", "p1", "p2", "p3"]
-    score_calls: list[tuple[str, int, int]] = []
+    score_calls: list[tuple[str, str, int, int]] = []
     trainer_configs = []
 
     class FakeRequestDataset:
@@ -73,10 +73,19 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
             return len(self.prompts)
 
     class FakePolicy:
+        instance_count = 0
+
         def __init__(self, model_name: str) -> None:
+            FakePolicy.instance_count += 1
             self.model_name = model_name
             self.model = torch.nn.Linear(1, 1)
             self.rows: dict[str, list] = {}
+            self.offload_count = 0
+            self.role = (
+                "reference"
+                if FakePolicy.instance_count == 1
+                else "target"
+            )
 
         def generate_new_dataset(
             self,
@@ -85,38 +94,41 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
         ) -> None:
             assert batch_size == 2
             self.rows["prompts"] = list(dataset.prompts)
-            self.rows["answers"] = [f"answer-{index}" for index in range(4)]
+            self.rows["answers"] = [
+                f"{self.role}-answer-{index}" for index in range(4)
+            ]
 
         def get_dataset_col(self, name: str) -> list:
             return self.rows[name]
 
         def offload(self) -> None:
+            self.offload_count += 1
             self.model.to("cpu")
 
     class FakeRewardModel:
         def __init__(self, model_name: str, mode_name: str) -> None:
             self.model = torch.nn.Linear(1, 1)
             self.mode_name = mode_name
-            self.std = None
 
-        def init_normalization(
+        def score(
             self,
-            policy: FakePolicy,
-            batch_size: int,
-        ) -> None:
-            self.std = torch.tensor(0.5)
-
-        def score_policy(
-            self,
-            policy: FakePolicy,
+            batch_prompts: list[str],
+            batch_answers: list[str],
             batch_size: int,
             max_length: int,
-            normalize_score: bool,
-        ) -> None:
-            assert normalize_score is True
-            score_calls.append((self.mode_name, batch_size, max_length))
-            policy.rows[self.mode_name] = (
-                [1.0, -1.0, 1.0, -1.0]
+        ) -> list[float]:
+            role = batch_answers[0].split("-", maxsplit=1)[0]
+            score_calls.append(
+                (self.mode_name, role, batch_size, max_length)
+            )
+            if role == "reference":
+                return (
+                    [-1.0, 1.0, -1.0, 1.0]
+                    if self.mode_name == "proxy"
+                    else [-1.0, 1.0, 1.0, -1.0]
+                )
+            return (
+                [3.0, 0.0, 3.0, 0.0]
                 if self.mode_name == "proxy"
                 else [0.0, 0.0, 0.0, 0.0]
             )
@@ -157,14 +169,55 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
         reward_batch_size=2,
         judge_batch_size=1,
         score_max_length=128,
-        classifier_theta=0.0,
         classifier_test_size=0.25,
     )
 
-    classifier = functions.create_classifier(config)
+    classifier, calibration = functions.create_classifier(config)
 
     assert classifier.id == "test-id"
-    assert score_calls == [("proxy", 2, 128), ("judge", 1, 128)]
+    assert score_calls == [
+        ("proxy", "reference", 2, 128),
+        ("proxy", "target", 2, 128),
+        ("judge", "reference", 1, 128),
+        ("judge", "target", 1, 128),
+    ]
+    assert calibration.proxy_mean == pytest.approx(0.0)
+    assert calibration.proxy_std == pytest.approx(1.0)
+    assert calibration.judge_mean == pytest.approx(0.0)
+    assert calibration.judge_std == pytest.approx(1.0)
+    assert calibration.theta == pytest.approx(1.7)
     assert trainer_configs[0].lora_settings == config.lora_settings
     assert trainer_configs[0].output_dir.endswith("id=test-id")
     assert classifier.model.training is False
+
+    score_calls.clear()
+    _, reused_calibration = functions.create_classifier(
+        config,
+        calibration=calibration,
+    )
+    assert reused_calibration is calibration
+    assert score_calls == [
+        ("proxy", "target", 2, 128),
+        ("judge", "target", 1, 128),
+    ]
+
+    supplied_policy = FakePolicy("trained-policy")
+    score_calls.clear()
+    _, supplied_calibration = functions.create_classifier(
+        config,
+        policy=supplied_policy,
+        calibration=calibration,
+    )
+    assert supplied_calibration is calibration
+    assert supplied_policy.offload_count == 1
+    assert score_calls == [
+        ("proxy", "target", 2, 128),
+        ("judge", "target", 1, 128),
+    ]
+
+    with pytest.raises(ValueError, match="either policy"):
+        functions.create_classifier(
+            replace(config, policy_load_path="checkpoint"),
+            policy=supplied_policy,
+            calibration=calibration,
+        )
