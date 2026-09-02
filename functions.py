@@ -47,11 +47,19 @@ def eval_policy_with_reward(
 
     # 3.) PPO training 
     config = PPOTrainingConfig(
-        output_dir = (
+        output_dir=(
             f"outputs/ppo_policy/"
             f"{reward_mode_name}_{start}_{end}"
         ),
-        batch_size = batch_size
+        batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        rollout_forward_batch_size=rollout_forward_batch_size,
+        response_length=response_length,
+        num_ppo_epochs=4,
+        num_mini_batches=1,
+        learning_rate=3e-6,
+        save_steps=100,
+        save_total_limit=1,
     )
     trainer = PolicyPPOTrainer(policy, reward_model, value, dataset, config)
     trainer.train()
