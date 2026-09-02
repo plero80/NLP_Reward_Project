@@ -264,7 +264,7 @@ class RewardModel(ScoreModel):
         answers: Sequence[str],
         batch_size: int = 1,
         max_length: int = 2_048,
-        normalize_score: bool = False
+        normalize_score: bool = False,
     ) -> list[float]:
         if len(prompts) != len(answers):
             logger.error(
@@ -360,7 +360,7 @@ class RewardModel(ScoreModel):
         policy: PolicyModel,
         batch_size: int = 1,
         max_length: int = 2_048,
-        normalize_score: bool = False
+        normalize_score: bool = False,
     ) -> None:
         if policy.dataset is None:
             raise ValueError("The policy doesn't contain a dataset")
@@ -387,7 +387,7 @@ class RewardModel(ScoreModel):
             answers,
             batch_size=batch_size,
             max_length=max_length,
-            normalize_score
+            normalize_score,
         )
         
         policy.add_scores(scores, self.model_mode)
