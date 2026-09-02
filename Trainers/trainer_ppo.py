@@ -21,6 +21,7 @@ class PPOTrainingConfig:
     num_ppo_epochs: int = 4
     num_mini_batches: int = 1
     save_steps: int = 1000
+    save_total_limit: int = 1
     logging_steps: int = 10
 
 
@@ -119,6 +120,7 @@ class PolicyPPOTrainer:
             stop_token="eos",
             save_strategy="steps",
             save_steps=config.save_steps,
+            save_total_limit=config.save_total_limit,
             logging_steps=config.logging_steps,
             report_to="none",
         )
