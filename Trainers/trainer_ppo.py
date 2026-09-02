@@ -102,7 +102,7 @@ class PolicyPPOTrainer:
             ) from exc
         return PPOConfig, PPOTrainer
 
-    def train(self) -> Any:
+    def train(self, resume_from_checkpoint=None) -> Any:
         PPOConfig, PPOTrainer = self._trl_classes()
         config = self.config
 
@@ -133,9 +133,14 @@ class PolicyPPOTrainer:
             value_model=self.value.model,
             eval_dataset=self.eval_dataset,
         )
-        result = self.trainer.train()
+
+        result = self.trainer.train(
+            resume_from_checkpoint=resume_from_checkpoint
+        )
 
         final_directory = Path(config.output_dir) / "final"
+
         self.trainer.save_model(str(final_directory))
         self.policy.tokenizer.save_pretrained(final_directory)
+
         return result

@@ -394,8 +394,11 @@ Score:"""
         
         logger.info("Starting evaluation")
         
+        
         if policy.dataset is None:
             raise ValueError("The policy doesn't contain dataset to be evaluate with")
+        
+        logger.info("The size of the evaluation is : %s", len(policy.dataset.columns["prompts"]))
         
         dataset = policy.dataset
         column_names = (
