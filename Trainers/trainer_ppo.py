@@ -20,7 +20,7 @@ class PPOTrainingConfig:
     response_length: int = 128
     num_ppo_epochs: int = 4
     num_mini_batches: int = 1
-    save_steps: int = 100
+    save_steps: int = 1000
     logging_steps: int = 10
 
 
