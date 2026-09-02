@@ -33,6 +33,34 @@ def test_classifier_config_rejects_an_empty_range() -> None:
         functions.create_classifier(config)
 
 
+def test_gap_calibration_json_round_trip(tmp_path) -> None:
+    calibration = functions.GapCalibration(
+        proxy_mean=1.25,
+        proxy_std=2.5,
+        judge_mean=-0.75,
+        judge_std=0.5,
+        theta=1.7,
+    )
+    path = tmp_path / "calibration" / "reward_gap.json"
+
+    saved_path = calibration.save(path)
+
+    assert saved_path == path
+    assert functions.GapCalibration.load(path) == calibration
+
+
+def test_gap_calibration_load_rejects_invalid_std(tmp_path) -> None:
+    path = tmp_path / "invalid-calibration.json"
+    path.write_text(
+        '{"format_version": 1, "proxy_mean": 0, "proxy_std": 0, '
+        '"judge_mean": 0, "judge_std": 1, "theta": 1}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="proxy_std"):
+        functions.GapCalibration.load(path)
+
+
 def test_warm_start_cannot_overwrite_its_source_directory(tmp_path) -> None:
     checkpoint = tmp_path / "run" / "checkpoint-10"
     checkpoint.mkdir(parents=True)

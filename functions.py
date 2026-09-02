@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import gc
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -168,6 +169,67 @@ class GapCalibration:
     judge_mean: float
     judge_std: float
     theta: float
+
+    def save(self, path: str | Path) -> Path:
+        """Persist this frozen calibration as a versioned JSON file."""
+        _validate_gap_calibration(self)
+        destination = Path(path).expanduser()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "format_version": 1,
+            "proxy_mean": self.proxy_mean,
+            "proxy_std": self.proxy_std,
+            "judge_mean": self.judge_mean,
+            "judge_std": self.judge_std,
+            "theta": self.theta,
+        }
+        destination.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return destination
+
+    @classmethod
+    def load(cls, path: str | Path) -> "GapCalibration":
+        """Load and validate a calibration previously written by ``save``."""
+        source = Path(path).expanduser()
+        try:
+            payload = json.loads(source.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"Calibration file is not valid JSON: {source}"
+            ) from error
+
+        if not isinstance(payload, dict):
+            raise ValueError("Calibration JSON must contain an object")
+        if payload.get("format_version") != 1:
+            raise ValueError(
+                "Unsupported calibration format_version: "
+                f"{payload.get('format_version')!r}"
+            )
+
+        field_names = (
+            "proxy_mean",
+            "proxy_std",
+            "judge_mean",
+            "judge_std",
+            "theta",
+        )
+        missing = [name for name in field_names if name not in payload]
+        if missing:
+            raise ValueError(
+                f"Calibration file is missing fields: {missing}"
+            )
+        try:
+            calibration = cls(
+                **{name: float(payload[name]) for name in field_names}
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "Calibration fields must contain numeric values"
+            ) from error
+        _validate_gap_calibration(calibration)
+        return calibration
 
 
 _NORMALIZATION_EPSILON = 1e-8
