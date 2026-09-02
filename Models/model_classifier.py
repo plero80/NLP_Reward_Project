@@ -21,7 +21,11 @@ logger = logging.getLogger(__name__)
 
 class Classifier(BinaryClassifier):
     
-    def __init__(self, model_name: str) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        classifier_id: str | None = None,
+    ) -> None:
         
         self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -32,7 +36,7 @@ class Classifier(BinaryClassifier):
             )
         )
         self.model.to(current_device())
-        self.id = str(uuid4())
+        self.id = classifier_id or str(uuid4())
         
         
     def predict(

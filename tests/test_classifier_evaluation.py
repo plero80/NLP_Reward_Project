@@ -2,6 +2,7 @@ import unittest
 import json
 from pathlib import Path
 import tempfile
+from uuid import UUID
 
 import numpy as np
 from datasets import Dataset
@@ -53,6 +54,26 @@ class ClassifierMetricTests(unittest.TestCase):
 
 
 class ClassifierDatasetTests(unittest.TestCase):
+    def test_save_load_round_trip_preserves_id_theta_and_rows(self) -> None:
+        dataset = DatasetClassifier(theta=0.5)
+        dataset.add(
+            ["Unicode prompt: שלום\nnext line"],
+            ["answer"],
+            [2.0],
+            [1.0],
+        )
+
+        self.assertEqual(UUID(dataset.id).version, 4)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nested" / "dataset.json"
+            saved_path = dataset.save(path)
+            loaded = DatasetClassifier.load(saved_path)
+
+        self.assertEqual(saved_path, path)
+        self.assertEqual(loaded.id, dataset.id)
+        self.assertEqual(loaded.theta, dataset.theta)
+        self.assertEqual(loaded.dataset, dataset.dataset)
+
     def test_split_is_disjoint_and_stratified(self) -> None:
         dataset = DatasetClassifier(theta=0.0)
         prompts = [f"prompt-{index}" for index in range(20)]
@@ -70,6 +91,8 @@ class ClassifierDatasetTests(unittest.TestCase):
         self.assertEqual(len(test_dataset), 4)
         self.assertEqual(train_dataset.class_counts(), {0: 8, 1: 8})
         self.assertEqual(test_dataset.class_counts(), {0: 2, 1: 2})
+        self.assertEqual(train_dataset.id, dataset.id)
+        self.assertEqual(test_dataset.id, dataset.id)
         train_prompts = {row["prompt"] for row in train_dataset.dataset}
         test_prompts = {row["prompt"] for row in test_dataset.dataset}
         self.assertTrue(train_prompts.isdisjoint(test_prompts))

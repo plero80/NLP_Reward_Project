@@ -1,5 +1,6 @@
 from dataclasses import replace
 import inspect
+import logging
 
 import pytest
 import torch
@@ -15,8 +16,8 @@ def test_eval_policy_with_reward_accepts_only_config() -> None:
 
     invalid_config = replace(
         functions.ConfigEval(),
-        start=5,
-        end=5,
+        start_dataset=5,
+        end_dataset=5,
     )
     with pytest.raises(ValueError, match="end must be greater"):
         functions.eval_policy_with_reward(invalid_config)
@@ -69,8 +70,8 @@ def test_warm_start_cannot_overwrite_its_source_directory(tmp_path) -> None:
         functions._ppo_output_directory(
             replace(
                 functions.ConfigEval(),
-                start=0,
-                end=10,
+                start_dataset=0,
+                end_dataset=10,
                 policy_checkpoint=checkpoint,
                 output_dir=checkpoint.parent,
             )
@@ -78,8 +79,11 @@ def test_warm_start_cannot_overwrite_its_source_directory(tmp_path) -> None:
 
 
 def test_create_classifier_runs_sequential_scorers_and_lora(
+    caplog,
     monkeypatch,
+    tmp_path,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="functions")
     prompts = ["p0", "p1", "p2", "p3"]
     score_calls: list[tuple[str, str, int, int]] = []
     trainer_configs = []
@@ -162,9 +166,13 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
             )
 
     class FakeClassifier:
-        def __init__(self, model_name: str) -> None:
+        def __init__(
+            self,
+            model_name: str,
+            classifier_id: str | None = None,
+        ) -> None:
             self.model_name = model_name
-            self.id = "test-id"
+            self.id = classifier_id
             self.model = torch.nn.Linear(1, 2)
 
     class FakeClassifierTrainer:
@@ -198,11 +206,23 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
         judge_batch_size=1,
         score_max_length=128,
         classifier_test_size=0.25,
+        classifier_output_root=tmp_path,
     )
 
     classifier, calibration = functions.create_classifier(config)
 
-    assert classifier.id == "test-id"
+    assert classifier.id is not None
+    saved_dataset = functions.DatasetClassifier.load(
+        tmp_path / f"id={classifier.id}" / "dataset.json"
+    )
+    assert saved_dataset.id == classifier.id
+    assert saved_dataset.theta == calibration.theta
+    assert len(saved_dataset) == 4
+    assert (
+        "Reward-hack labels: 2 of 4 prompts (50.00%) are hacks"
+        in caplog.text
+    )
+    assert "Classifier label split:" in caplog.text
     assert score_calls == [
         ("proxy", "reference", 2, 128),
         ("proxy", "target", 2, 128),
@@ -215,7 +235,7 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
     assert calibration.judge_std == pytest.approx(1.0)
     assert calibration.theta == pytest.approx(1.7)
     assert trainer_configs[0].lora_settings == config.lora_settings
-    assert trainer_configs[0].output_dir.endswith("id=test-id")
+    assert trainer_configs[0].output_dir.endswith(f"id={classifier.id}")
     assert classifier.model.training is False
 
     score_calls.clear()

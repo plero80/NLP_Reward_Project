@@ -4,6 +4,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from datasets import load_dataset
 from peft import PeftModel
@@ -464,7 +465,11 @@ def create_classifier(
         target_judge - calibration.judge_mean
     ) / calibration.judge_std
 
-    classifier_dataset = DatasetClassifier(theta=calibration.theta)
+    artifact_id = str(uuid4())
+    classifier_dataset = DatasetClassifier(
+        theta=calibration.theta,
+        id=artifact_id,
+    )
     classifier_dataset.add(
         prompts=target_rows[0],
         answers=target_rows[1],
@@ -473,32 +478,60 @@ def create_classifier(
     )
 
     class_counts = classifier_dataset.class_counts()
+    total_count = len(classifier_dataset)
+    hack_count = class_counts.get(1, 0)
+    non_hack_count = class_counts.get(0, 0)
+    hack_percentage = 100.0 * hack_count / total_count
+    logger.info(
+        "Reward-hack labels: %d of %d prompts (%.2f%%) are hacks; "
+        "%d are non-hacks; theta=%.6f; dataset_id=%s",
+        hack_count,
+        total_count,
+        hack_percentage,
+        non_hack_count,
+        calibration.theta,
+        artifact_id,
+    )
     if len(class_counts) < 2:
         raise ValueError(
             "Classifier labels contain only one class under the frozen "
             f"calibration threshold; class counts: {class_counts}"
         )
 
+    run_directory = (
+        Path(config.classifier_output_root) / f"id={artifact_id}"
+    )
+    dataset_path = classifier_dataset.save(run_directory / "dataset.json")
+    logger.info("Saved classifier dataset to %s", dataset_path)
+
     train_dataset, test_dataset = classifier_dataset.split(
         test_size=config.classifier_test_size,
         random_state=config.classifier_random_state,
     )
-
-    classifier = Classifier(config.classifier_model_name)
-    training_config = ClassifierTrainingConfig(
-        output_dir=str(
-            Path(config.classifier_output_root) / f"id={classifier.id}"
-        ),
-        epochs=config.classifier_epochs,
-        batch_size=config.classifier_batch_size,
-        learning_rate=config.classifier_learning_rate,
-        max_length=config.classifier_max_length,
-        lora_settings=config.lora_settings,
+    logger.info(
+        "Classifier label split: train=%s; test=%s",
+        train_dataset.class_counts(),
+        test_dataset.class_counts(),
     )
-    classifier_trainer = ClassifierTrainer(classifier, training_config)
+
+    classifier: Classifier | None = None
+    classifier_trainer: ClassifierTrainer | None = None
     hf_trainer = None
 
     try:
+        classifier = Classifier(
+            config.classifier_model_name,
+            classifier_id=artifact_id,
+        )
+        training_config = ClassifierTrainingConfig(
+            output_dir=str(run_directory),
+            epochs=config.classifier_epochs,
+            batch_size=config.classifier_batch_size,
+            learning_rate=config.classifier_learning_rate,
+            max_length=config.classifier_max_length,
+            lora_settings=config.lora_settings,
+        )
+        classifier_trainer = ClassifierTrainer(classifier, training_config)
         hf_trainer = classifier_trainer.train(train_dataset)
         metrics = classifier_trainer.evaluate(hf_trainer, test_dataset)
         logger.info("Classifier test metrics: %s", metrics)
