@@ -37,11 +37,13 @@ class PolicyPPOTrainer:
         train_dataset: Dataset,
         config: PPOTrainingConfig,
         eval_dataset: Dataset | None = None,
+        reference_policy: PolicyModel | None = None,
     ) -> None:
         self.policy = policy
         self.reward = reward
         self.value = value
         self.config = config
+        self.reference_policy = reference_policy
         policy_vocabulary = self.policy.tokenizer.get_vocab()
         for model_name, tokenizer in (
             ("reward", self.reward.tokenizer),
@@ -52,6 +54,13 @@ class PolicyPPOTrainer:
                     f"The policy and {model_name} models must use the same "
                     "tokenizer vocabulary for TRL PPO"
                 )
+        if (
+            self.reference_policy is not None
+            and self.reference_policy.tokenizer.get_vocab() != policy_vocabulary
+        ):
+            raise ValueError(
+                "The reference policy must use the policy tokenizer vocabulary"
+            )
         for entry in self.reward.classifiers:
             if entry["classifier"].tokenizer.get_vocab() != policy_vocabulary:
                 raise ValueError(
@@ -104,7 +113,7 @@ class PolicyPPOTrainer:
             ) from exc
         return PPOConfig, PPOTrainer
 
-    def train(self, resume_from_checkpoint=None) -> Any:
+    def train(self) -> Any:
         PPOConfig, PPOTrainer = self._trl_classes()
         config = self.config
 
@@ -133,7 +142,11 @@ class PolicyPPOTrainer:
             args=args,
             processing_class=self.policy.tokenizer,
             model=cast(PreTrainedModel, self.policy.model),
-            ref_model=None,
+            ref_model=(
+                cast(PreTrainedModel, self.reference_policy.model)
+                if self.reference_policy is not None
+                else None
+            ),
             reward_model=self.reward.for_ppo(),
             train_dataset=self.train_dataset,
             value_model=self.value.model,

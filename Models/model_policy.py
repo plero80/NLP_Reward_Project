@@ -3,9 +3,10 @@ from transformers import (
     AutoModelForCausalLM,
 )
 from typing import Any, Protocol, TypeGuard, cast
+from pathlib import Path
 import torch
 from datasets import Dataset as HFDataset, DatasetDict
-from peft import TaskType, get_peft_model
+from peft import PeftConfig, PeftModel, TaskType, get_peft_model
 
 
 from Datasets.dataset_request import RequestDataset
@@ -46,6 +47,12 @@ class _CausalLanguageModel(Protocol):
 
 
 class PolicyModel(GenerateModel):
+
+    @staticmethod
+    def _configure_tokenizer(tokenizer: Any) -> None:
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "left"
     
     def __init__(
         self,
@@ -55,12 +62,7 @@ class PolicyModel(GenerateModel):
         
         self.model_name: str = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        # Decoder-only models should generally use left padding for generation.
-        self.tokenizer.padding_side = "left"
+        self._configure_tokenizer(self.tokenizer)
         
         
         base_model = AutoModelForCausalLM.from_pretrained(
@@ -176,6 +178,25 @@ class PolicyModel(GenerateModel):
             )
         
     
+    def offload(self) -> None:
+        self.model.to("cpu")
+    
+    
+    
+    def move_to_gpu(self, device: str = "cuda") -> None:
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available")
+
+        self.model.to(device)
+        
+        
+    def return_rows(self) -> tuple[str,str,float,float]:
+        if self.dataset is not None:
+            return self.dataset["prompts"], self.dataset["answers"], self.dataset["proxy"], self.dataset["judge"]  
+        
+        else:
+            raise ValueError("The dataset doesn't contain all the necessary data to create dataset for training classifier")
+
         
     def get_dataset_col(self, name) -> list:
         if self.dataset is None:
@@ -326,3 +347,82 @@ class PolicyModel(GenerateModel):
         logger.debug("%s: Policy model output: %s", NAME, full_text)
         
         return prompt, answer
+
+
+    @classmethod
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        is_trainable: bool = False,
+        device: torch.device | str | None = None,
+    ) -> "PolicyModel":
+        """Load policy weights saved by PPO or :meth:`save`.
+
+        Full-model checkpoints contain ``config.json`` and
+        ``model.safetensors``. PEFT checkpoints instead contain
+        ``adapter_config.json`` and adapter weights; for those checkpoints the
+        base model is loaded first and the trained adapter is attached.
+
+        This restores policy weights only. It does not restore PPO optimizer,
+        scheduler, critic, RNG, or dataloader state.
+        """
+        checkpoint = Path(path).expanduser()
+        if not checkpoint.exists():
+            raise FileNotFoundError(f"Policy checkpoint not found: {checkpoint}")
+        if not checkpoint.is_dir():
+            raise NotADirectoryError(
+                f"Policy checkpoint must be a directory: {checkpoint}"
+            )
+
+        checkpoint_source = str(checkpoint)
+        adapter_checkpoint = (checkpoint / "adapter_config.json").is_file()
+
+        if adapter_checkpoint:
+            peft_config = PeftConfig.from_pretrained(checkpoint_source)
+            base_model_name = peft_config.base_model_name_or_path
+            if not base_model_name:
+                raise ValueError(
+                    "PEFT checkpoint does not identify its base model: "
+                    f"{checkpoint}"
+                )
+
+            tokenizer_source = (
+                checkpoint_source
+                if (checkpoint / "tokenizer_config.json").is_file()
+                else base_model_name
+            )
+            base_model = AutoModelForCausalLM.from_pretrained(
+                base_model_name,
+                dtype=best_dtype(),
+            )
+            model = PeftModel.from_pretrained(
+                base_model,
+                checkpoint_source,
+                is_trainable=is_trainable,
+            )
+            model_name = base_model_name
+        else:
+            tokenizer_source = checkpoint_source
+            model = AutoModelForCausalLM.from_pretrained(
+                checkpoint_source,
+                dtype=best_dtype(),
+            )
+            model_name = checkpoint_source
+
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
+        cls._configure_tokenizer(tokenizer)
+
+        loaded = cls.__new__(cls)
+        loaded.model_name = model_name
+        loaded.tokenizer = tokenizer
+        loaded.model = cast(_CausalLanguageModel, model)
+        loaded.model.to(device if device is not None else current_device())
+        loaded.dataset = None
+
+        if is_trainable:
+            model.train()
+        else:
+            model.eval()
+
+        return loaded

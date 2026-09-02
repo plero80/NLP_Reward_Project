@@ -14,14 +14,14 @@ from collections.abc import Sequence
 import logging
 
 from Models.runtime import best_dtype, current_device
-
+from uuid import uuid4
 
 
 logger = logging.getLogger(__name__)
 
 class Classifier(BinaryClassifier):
     
-    def __init__(self, name, model_name: str) -> None:
+    def __init__(self, model_name: str) -> None:
         
         self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -32,7 +32,7 @@ class Classifier(BinaryClassifier):
             )
         )
         self.model.to(current_device())
-        self.name = name
+        self.id = str(uuid4())
         
         
     def predict(
@@ -43,13 +43,13 @@ class Classifier(BinaryClassifier):
         ) -> list[int]:
 
             probabilities = self.predict_proba(prompts, answers)
-            logger.info("Classifier:%s predicting the labels", self.name)
+            logger.info("Classifier:%s predicting the labels", self.id)
             
             labels = [
                 int(label >= threshold) for label in probabilities
             ]
             
-            logger.debug("Classifier:%s labels: %s", self.name, labels)
+            logger.debug("Classifier:%s labels: %s", self.id, labels)
             return labels
     
     
@@ -66,7 +66,7 @@ class Classifier(BinaryClassifier):
             return []
 
         
-        logger.info("Classifier:%s predicting the inputs", self.name)
+        logger.info("Classifier:%s predicting the inputs", self.id)
         
         
         inputs = self.tokenizer(
@@ -103,5 +103,5 @@ class Classifier(BinaryClassifier):
 
         outputs = probabilities.float().cpu().tolist()
         
-        logger.debug("Classifier:%s probabilities: %s", self.name, outputs)
+        logger.debug("Classifier:%s probabilities: %s", self.id, outputs)
         return outputs
