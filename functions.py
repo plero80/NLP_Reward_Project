@@ -213,10 +213,16 @@ def create_classifier(
             scorer: RewardModel | None = None
             try:
                 scorer = RewardModel(model_name, mode_name)
+                scorer.init_normalization(policy, batch_size)
+                
+                if mode_name == "judge":
+                    config.classifier_theta = scorer.std
+                
                 scorer.score_policy(
                     policy,
                     batch_size=batch_size,
                     max_length=config.score_max_length,
+                    normalize_score = True
                 )
             except BaseException:
                 # Notebook tracebacks may retain the failed scorer. Offload it

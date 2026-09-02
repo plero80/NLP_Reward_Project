@@ -264,6 +264,7 @@ class RewardModel(ScoreModel):
         answers: Sequence[str],
         batch_size: int = 1,
         max_length: int = 2_048,
+        normalize_score: bool = False
     ) -> list[float]:
         if len(prompts) != len(answers):
             logger.error(
@@ -342,7 +343,7 @@ class RewardModel(ScoreModel):
             combined_scores,
         )
         
-        if self.std is not None and self.mean is not None:
+        if self.std is not None and self.mean is not None and normalize_score is True:
             normalized_scores = (
                 torch.as_tensor(combined_scores, dtype=torch.float32)
                 - self.mean.cpu()
@@ -359,6 +360,7 @@ class RewardModel(ScoreModel):
         policy: PolicyModel,
         batch_size: int = 1,
         max_length: int = 2_048,
+        normalize_score: bool = False
     ) -> None:
         if policy.dataset is None:
             raise ValueError("The policy doesn't contain a dataset")
@@ -385,6 +387,7 @@ class RewardModel(ScoreModel):
             answers,
             batch_size=batch_size,
             max_length=max_length,
+            normalize_score
         )
         
         policy.add_scores(scores, self.model_mode)
