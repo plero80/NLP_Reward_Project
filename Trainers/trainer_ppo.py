@@ -134,9 +134,7 @@ class PolicyPPOTrainer:
             eval_dataset=self.eval_dataset,
         )
 
-        result = self.trainer.train(
-            resume_from_checkpoint=resume_from_checkpoint
-        )
+        result = self.trainer.train()
 
         final_directory = Path(config.output_dir) / "final"
 
