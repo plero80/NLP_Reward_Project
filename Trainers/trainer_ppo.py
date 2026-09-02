@@ -16,6 +16,7 @@ class PPOTrainingConfig:
     epochs: float = 1.0
     batch_size: int = 1
     gradient_accumulation_steps: int = 1
+    rollout_forward_batch_size: int = 16
     learning_rate: float = 3e-6
     response_length: int = 128
     num_ppo_epochs: int = 4
@@ -114,6 +115,9 @@ class PolicyPPOTrainer:
             per_device_eval_batch_size=config.batch_size,
             gradient_accumulation_steps=config.gradient_accumulation_steps,
             learning_rate=config.learning_rate,
+            local_rollout_forward_batch_size=(
+                config.rollout_forward_batch_size
+            ),
             response_length=config.response_length,
             num_ppo_epochs=config.num_ppo_epochs,
             num_mini_batches=config.num_mini_batches,
