@@ -518,7 +518,7 @@ def _ppo_output_directory(
 ) -> str:
     default_output_dir = Path(
         "outputs/ppo_policy/"
-        f"{config.reward_mode_name}_{config.start}_{config.end}"
+        f"{config.reward_mode_name}_{config.start_dataset}_{config.end_dataset}"
     )
     if config.output_dir is None:
         if config.policy_checkpoint is None:
@@ -552,7 +552,7 @@ def eval_policy_with_reward(
     not an exact PPO resume because optimizer, value-model, RNG, and dataloader
     state are not restored.
     """
-    if config.start < 0 or config.end <= config.start:
+    if config.start_dataset < 0 or config.end_dataset <= config.start_dataset:
         raise ValueError("end must be greater than a non-negative start")
     if config.epochs <= 0:
         raise ValueError("epochs must be positive")
@@ -594,7 +594,7 @@ def eval_policy_with_reward(
 
         raw_dataset = load_dataset(config.dataset_name)
         dataset = RequestDataset.from_raw(raw_dataset, policy.model_name)
-        dataset.truncate(config.start, config.end)
+        dataset.truncate(config.start_dataset, config.end_dataset)
         if len(dataset) == 0:
             raise ValueError("The selected PPO dataset range is empty")
 
