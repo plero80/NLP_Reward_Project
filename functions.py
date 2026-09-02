@@ -545,7 +545,7 @@ def _ppo_output_directory(
 
 def eval_policy_with_reward(
     config: ConfigEval,
-) -> float:
+) -> tuple[PolicyModel, float]:
     """Train PPO, generate answers, and evaluate the resulting policy.
 
     ``config.policy_checkpoint`` performs a policy-weight warm start. It is
@@ -671,7 +671,7 @@ def eval_policy_with_reward(
 
         evaluator = model_evaluator.PrometheusEvaluator()
         evaluation_score = float(evaluator.evaluate(policy))
-        return evaluation_score
+        return policy, evaluation_score
     except BaseException:
         offload_to_cpu(evaluator)
         offload_to_cpu(policy)
