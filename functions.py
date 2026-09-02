@@ -81,8 +81,8 @@ class ConfigEval:
     """Configuration for PPO training followed by policy evaluation."""
 
     dataset_name: str = "Anthropic/hh-rlhf"
-    start: int = 0
-    end: int = 1000
+    start_dataset: int = 0
+    end_dataset: int = 1000
 
     policy_name: str = "Qwen/Qwen3-0.6B"
     reward_model_name: str = "Skywork/Skywork-Reward-V2-Qwen3-0.6B"
