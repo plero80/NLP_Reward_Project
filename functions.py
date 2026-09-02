@@ -19,14 +19,19 @@ RequestDataset = dataset_request.RequestDataset
 
 
 
-def eval_policy_with_reward(dataset_name: str,
-                            start: int,
-                            end: int,
-                            policy_name: str,
-                            reward_model_name: str,
-                            reward_mode_name,
-                            batch_size = 16,
-                            policy_batch_size = 16) -> float :
+def eval_policy_with_reward(
+    dataset_name: str,
+    start: int,
+    end: int,
+    policy_name: str,
+    reward_model_name: str,
+    reward_mode_name: str,
+    batch_size: int = 16,
+    gradient_accumulation_steps: int = 4,
+    rollout_forward_batch_size: int = 16,
+    policy_batch_size: int = 16,
+    response_length: int = 128,
+) -> float:
 
     # 1.) Create dataset
     dataset = load_dataset(dataset_name)
