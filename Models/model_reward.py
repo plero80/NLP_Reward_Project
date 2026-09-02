@@ -387,7 +387,7 @@ class RewardModel(ScoreModel):
             answers,
             batch_size=batch_size,
             max_length=max_length,
-            normalize_score,
+            normalize_score=normalize_score,
         )
         
         policy.add_scores(scores, self.model_mode)

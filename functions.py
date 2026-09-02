@@ -291,26 +291,26 @@ def create_classifier(
 
 
 def _ppo_output_directory(
-    reward_mode_name: str,
-    start: int,
-    end: int,
-    policy_checkpoint: str | Path | None,
-    output_dir: str | Path | None,
+    config: ConfigEval,
 ) -> str:
     default_output_dir = Path(
-        f"outputs/ppo_policy/{reward_mode_name}_{start}_{end}"
+        "outputs/ppo_policy/"
+        f"{config.reward_mode_name}_{config.start}_{config.end}"
     )
-    if output_dir is None:
-        if policy_checkpoint is None:
+    if config.output_dir is None:
+        if config.policy_checkpoint is None:
             return str(default_output_dir)
         return str(
             default_output_dir.parent
-            / f"{default_output_dir.name}_from_{Path(policy_checkpoint).name}"
+            / (
+                f"{default_output_dir.name}_from_"
+                f"{Path(config.policy_checkpoint).name}"
+            )
         )
 
-    selected_output = Path(output_dir).expanduser()
-    if policy_checkpoint is not None:
-        checkpoint = Path(policy_checkpoint).expanduser().resolve()
+    selected_output = Path(config.output_dir).expanduser()
+    if config.policy_checkpoint is not None:
+        checkpoint = Path(config.policy_checkpoint).expanduser().resolve()
         resolved_output = selected_output.resolve()
         if resolved_output in {checkpoint, checkpoint.parent}:
             raise ValueError(
@@ -321,50 +321,36 @@ def _ppo_output_directory(
 
 
 def eval_policy_with_reward(
-    dataset_name: str,
-    start: int,
-    end: int,
-    policy_name: str,
-    reward_model_name: str,
-    reward_mode_name: str,
-    epochs: float = 1.0,
-    batch_size: int = 16,
-    gradient_accumulation_steps: int = 4,
-    rollout_forward_batch_size: int = 16,
-    policy_batch_size: int = 16,
-    response_length: int = 128,
-    save_steps: int = 10,
-    policy_checkpoint: str | Path | None = None,
-    output_dir: str | Path | None = None,
+    config: ConfigEval,
 ) -> float:
     """Train PPO, generate answers, and evaluate the resulting policy.
 
-    ``policy_checkpoint`` performs a policy-weight warm start. It is not an
-    exact PPO resume because optimizer, value-model, RNG, and dataloader state
-    are not restored.
+    ``config.policy_checkpoint`` performs a policy-weight warm start. It is
+    not an exact PPO resume because optimizer, value-model, RNG, and dataloader
+    state are not restored.
     """
-    if start < 0 or end <= start:
+    if config.start < 0 or config.end <= config.start:
         raise ValueError("end must be greater than a non-negative start")
-    if epochs <= 0:
+    if config.epochs <= 0:
         raise ValueError("epochs must be positive")
     for name, value in (
-        ("batch_size", batch_size),
-        ("gradient_accumulation_steps", gradient_accumulation_steps),
-        ("rollout_forward_batch_size", rollout_forward_batch_size),
-        ("policy_batch_size", policy_batch_size),
-        ("response_length", response_length),
-        ("save_steps", save_steps),
+        ("batch_size", config.batch_size),
+        (
+            "gradient_accumulation_steps",
+            config.gradient_accumulation_steps,
+        ),
+        (
+            "rollout_forward_batch_size",
+            config.rollout_forward_batch_size,
+        ),
+        ("policy_batch_size", config.policy_batch_size),
+        ("response_length", config.response_length),
+        ("save_steps", config.save_steps),
     ):
         if value < 1:
             raise ValueError(f"{name} must be at least 1")
 
-    training_output_dir = _ppo_output_directory(
-        reward_mode_name,
-        start,
-        end,
-        policy_checkpoint,
-        output_dir,
-    )
+    training_output_dir = _ppo_output_directory(config)
 
     policy: PolicyModel | None = None
     reference_policy: PolicyModel | None = None
@@ -375,39 +361,49 @@ def eval_policy_with_reward(
 
     try:
         policy = (
-            PolicyModel.load(policy_checkpoint, is_trainable=True)
-            if policy_checkpoint is not None
-            else PolicyModel(policy_name)
+            PolicyModel.load(
+                config.policy_checkpoint,
+                is_trainable=True,
+            )
+            if config.policy_checkpoint is not None
+            else PolicyModel(config.policy_name)
         )
 
-        raw_dataset = load_dataset(dataset_name)
+        raw_dataset = load_dataset(config.dataset_name)
         dataset = RequestDataset.from_raw(raw_dataset, policy.model_name)
-        dataset.truncate(start, end)
+        dataset.truncate(config.start, config.end)
         if len(dataset) == 0:
             raise ValueError("The selected PPO dataset range is empty")
 
         # Full-model warm starts need the original policy for KL reference.
         # For PEFT, TRL can use the base model with the adapter disabled.
         reference_policy = (
-            PolicyModel(policy_name)
-            if policy_checkpoint is not None
+            PolicyModel(config.policy_name)
+            if config.policy_checkpoint is not None
             and not isinstance(policy.model, PeftModel)
             else None
         )
-        value_model = ValueModel(policy_name)
-        reward_model = RewardModel(reward_model_name, reward_mode_name)
+        value_model = ValueModel(config.policy_name)
+        reward_model = RewardModel(
+            config.reward_model_name,
+            config.reward_mode_name,
+        )
 
         ppo_config = PPOTrainingConfig(
             output_dir=training_output_dir,
-            epochs=epochs,
-            batch_size=batch_size,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-            rollout_forward_batch_size=rollout_forward_batch_size,
-            response_length=response_length,
+            epochs=config.epochs,
+            batch_size=config.batch_size,
+            gradient_accumulation_steps=(
+                config.gradient_accumulation_steps
+            ),
+            rollout_forward_batch_size=(
+                config.rollout_forward_batch_size
+            ),
+            response_length=config.response_length,
             num_ppo_epochs=4,
             num_mini_batches=1,
             learning_rate=3e-6,
-            save_steps=save_steps,
+            save_steps=config.save_steps,
             save_total_limit=1,
         )
         trainer = PolicyPPOTrainer(
@@ -440,7 +436,7 @@ def eval_policy_with_reward(
         try:
             policy.generate_new_dataset(
                 dataset,
-                batch_size=policy_batch_size,
+                batch_size=config.policy_batch_size,
             )
         except BaseException:
             offload_to_cpu(policy)

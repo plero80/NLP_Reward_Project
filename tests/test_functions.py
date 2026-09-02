@@ -1,9 +1,25 @@
 from dataclasses import replace
+import inspect
 
 import pytest
 import torch
 
 import functions
+
+
+def test_eval_policy_with_reward_accepts_only_config() -> None:
+    parameters = inspect.signature(
+        functions.eval_policy_with_reward
+    ).parameters
+    assert tuple(parameters) == ("config",)
+
+    invalid_config = replace(
+        functions.ConfigEval(),
+        start=5,
+        end=5,
+    )
+    with pytest.raises(ValueError, match="end must be greater"):
+        functions.eval_policy_with_reward(invalid_config)
 
 
 def test_classifier_config_rejects_an_empty_range() -> None:
@@ -23,11 +39,13 @@ def test_warm_start_cannot_overwrite_its_source_directory(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="new output directory"):
         functions._ppo_output_directory(
-            "proxy",
-            0,
-            10,
-            checkpoint,
-            checkpoint.parent,
+            replace(
+                functions.ConfigEval(),
+                start=0,
+                end=10,
+                policy_checkpoint=checkpoint,
+                output_dir=checkpoint.parent,
+            )
         )
 
 
@@ -79,13 +97,23 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
         def __init__(self, model_name: str, mode_name: str) -> None:
             self.model = torch.nn.Linear(1, 1)
             self.mode_name = mode_name
+            self.std = None
+
+        def init_normalization(
+            self,
+            policy: FakePolicy,
+            batch_size: int,
+        ) -> None:
+            self.std = torch.tensor(0.5)
 
         def score_policy(
             self,
             policy: FakePolicy,
             batch_size: int,
             max_length: int,
+            normalize_score: bool,
         ) -> None:
+            assert normalize_score is True
             score_calls.append((self.mode_name, batch_size, max_length))
             policy.rows[self.mode_name] = (
                 [1.0, -1.0, 1.0, -1.0]
