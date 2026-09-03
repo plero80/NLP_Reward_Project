@@ -738,12 +738,64 @@ def eval_policy_with_reward(
 
 
 
-def reward_similarity(dataset, policy: PolicyModel, proxy: RewardModel, judge: RewardModel):
+def get_gap_calibration(
+    dataset,
+    policy: PolicyModel,
+    proxy: RewardModel,
+    judge: RewardModel,
+    quantile: float = 0.95,
+    policy_batch_size: int = 64,
+    proxy_batch_size: int = 64,
+    judge_batch_size: int = 16,
+) -> GapCalibration:
+    
+    if not 0.0 < quantile < 1.0:
+
+        raise ValueError("quantile must be between 0 and 1")
+
+    policy.generate_new_dataset(dataset, policy_batch_size)
+    offload_to_cpu(policy)
+    empty_cuda_cache()
+
+    try:
+        proxy.score_policy(policy, proxy_batch_size)
+    finally:
+        offload_to_cpu(proxy)
+        empty_cuda_cache()
+
+    try:
+        judge.score_policy(policy, judge_batch_size)
+    finally:
+        offload_to_cpu(judge)
+        empty_cuda_cache()
+
+    return _build_gap_calibration(
+        policy.get_dataset_col("proxy"),
+        policy.get_dataset_col("judge"),
+        quantile,
+    )
 
 
-    policy.generate_new_dataset(dataset, 64)
-    proxy.score_policy(policy, 64)
-    judge.score_policy(policy, 16)
+
+def reward_similarity(dataset, policy: PolicyModel, proxy: RewardModel, judge: RewardModel, policy_batch_size=64, proxy_batch_size=64, judge_batch_size=16):
+
+
+    policy.generate_new_dataset(dataset, policy_batch_size)
+
+    try:
+        proxy.score_policy(policy, proxy_batch_size)
+    finally:
+        offload_to_cpu(proxy)
+        proxy = None
+        empty_cuda_cache()
+
+    try:
+        judge.score_policy(policy, judge_batch_size)
+    finally:
+        offload_to_cpu(judge)
+        judge = None
+        empty_cuda_cache()
+
 
     gap = _build_gap_calibration(policy.get_dataset_col("proxy"), policy.get_dataset_col("judge"), 0.95)
     policy.normalize_score_col("proxy", gap.proxy_mean, gap.proxy_std)
