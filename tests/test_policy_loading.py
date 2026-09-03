@@ -15,11 +15,17 @@ class _FakeTokenizer:
         self.eos_token = "<eos>"
         self.padding_side = "right"
 
+    def save_pretrained(self, path: str | Path) -> None:
+        Path(path).mkdir(parents=True, exist_ok=True)
+
 
 class _FakeModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    def save_pretrained(self, path: str | Path) -> None:
+        Path(path).mkdir(parents=True, exist_ok=True)
 
 
 def test_load_full_policy_checkpoint(
@@ -148,3 +154,45 @@ def test_move_to_current_device_restores_offloaded_policy(
 
     assert selected_device == expected_device
     assert policy.model.devices == [expected_device]
+
+
+def test_policy_save_and_load_restores_complete_dataset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "policy"
+    tokenizer = _FakeTokenizer()
+    model = _FakeModel()
+    dataset = model_policy.RequestDataset.__new__(model_policy.RequestDataset)
+    dataset.tokenizer = tokenizer
+    dataset.tokenizer_name = "base/policy"
+    dataset.columns = {
+        "prompts": ["p1", "p2"],
+        "answers": ["a1", "a2"],
+        "proxy": [0.25, 0.75],
+        "judge": [0.5, 0.6],
+    }
+    policy = PolicyModel.__new__(PolicyModel)
+    policy.model_name = "base/policy"
+    policy.model = model
+    policy.tokenizer = tokenizer
+    policy.dataset = dataset
+
+    policy.save(checkpoint)
+
+    monkeypatch.setattr(
+        model_policy.AutoTokenizer,
+        "from_pretrained",
+        lambda _source: tokenizer,
+    )
+    monkeypatch.setattr(
+        model_policy.AutoModelForCausalLM,
+        "from_pretrained",
+        lambda _source, **_kwargs: model,
+    )
+    loaded = PolicyModel.load(checkpoint, device="cpu")
+
+    assert loaded.dataset is not None
+    assert loaded.dataset.columns == dataset.columns
+    assert loaded.dataset.tokenizer is tokenizer
+    assert loaded.dataset.tokenizer_name == "base/policy"

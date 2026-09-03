@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from Models.runtime import best_dtype, current_device
-
+from collections.abc import Callable
 
 
 logger = logging.getLogger(__name__)
@@ -583,3 +583,12 @@ class DeterministicReward:
     def for_ppo(self) -> torch.nn.Module:
         self.model.eval()
         return self.model
+
+
+
+
+
+
+
+
+        

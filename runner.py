@@ -351,6 +351,9 @@ class Runner:
             self.dataset,
             batch_size=getattr(self.config, "generation_batch_size", 8),
         )
+        self.policy.save_dataset(
+            Path(self._ppo_config().output_dir) / "final"
+        )
         prompts, answers = self._text_columns(generated_training_dataset)
         reward_scores = self.reward.score(prompts, answers)
         judge_scores = self.judge.score(prompts, answers)

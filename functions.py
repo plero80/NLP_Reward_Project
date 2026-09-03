@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 import gc
 import json
@@ -15,6 +17,8 @@ from Datasets.dataset_classifier import DatasetClassifier
 from Datasets.dataset_request import RequestDataset
 from Models.lora import LoRASettings
 from Models.model_classifier import Classifier
+from Models.models import PPORewardModelProtocol
+from Factory import *
 import Models.model_evaluator as model_evaluator
 from Models.model_policy import PolicyModel
 from Models.model_reward import RewardModel
@@ -78,30 +82,7 @@ def latest_ppo_checkpoint(output_dir: str | Path) -> str:
     return checkpoint
 
 
-@dataclass
-class ConfigEval:
-    """Configuration for PPO training followed by policy evaluation."""
 
-    dataset_name: str = "Anthropic/hh-rlhf"
-    start_dataset: int = 0
-    end_dataset: int = 1000
-
-    policy_name: str = "Qwen/Qwen3-0.6B"
-    reward_model_name: str = "Skywork/Skywork-Reward-V2-Qwen3-0.6B"
-    reward_mode_name: str = "proxy"
-
-    epochs: float = 1.0
-    batch_size: int = 8
-    gradient_accumulation_steps: int = 8
-    rollout_forward_batch_size: int = 16
-    response_length: int = 128
-    policy_batch_size: int = 64
-    save_steps: int = 10
-
-    # This is a policy-only warm start, not an exact PPO resume. Optimizer,
-    # value-model, RNG, and dataloader state are not restored.
-    policy_checkpoint: str | Path | None = None
-    output_dir: str | Path | None = None
 
 
 @dataclass
@@ -565,26 +546,39 @@ def create_classifier(
 
 
 def _ppo_output_directory(
-    config: ConfigEval,
+    config: ConfigEval  | TrainingPPOConfig,
 ) -> str:
+    if isinstance(config, TrainingPPOConfig):
+        reward_mode_name = config.reward.mode_name
+        start_dataset = config.dataset.start
+        end_dataset = config.dataset.end
+        policy_checkpoint = config.policy.checkpoint
+        output_dir = config.output_dir
+    else:
+        reward_mode_name = config.reward_mode_name
+        start_dataset = config.start_dataset
+        end_dataset = config.end_dataset
+        policy_checkpoint = config.policy_checkpoint
+        output_dir = config.output_dir
+
     default_output_dir = Path(
         "outputs/ppo_policy/"
-        f"{config.reward_mode_name}_{config.start_dataset}_{config.end_dataset}"
+        f"{reward_mode_name}_{start_dataset}_{end_dataset}"
     )
-    if config.output_dir is None:
-        if config.policy_checkpoint is None:
+    if output_dir is None:
+        if policy_checkpoint is None:
             return str(default_output_dir)
         return str(
             default_output_dir.parent
             / (
                 f"{default_output_dir.name}_from_"
-                f"{Path(config.policy_checkpoint).name}"
+                f"{Path(policy_checkpoint).name}"
             )
         )
 
-    selected_output = Path(config.output_dir).expanduser()
-    if config.policy_checkpoint is not None:
-        checkpoint = Path(config.policy_checkpoint).expanduser().resolve()
+    selected_output = Path(output_dir).expanduser()
+    if policy_checkpoint is not None:
+        checkpoint = Path(policy_checkpoint).expanduser().resolve()
         resolved_output = selected_output.resolve()
         if resolved_output in {checkpoint, checkpoint.parent}:
             raise ValueError(
@@ -708,6 +702,7 @@ def eval_policy_with_reward(
                 dataset,
                 batch_size=config.policy_batch_size,
             )
+            policy.save_dataset(Path(training_output_dir) / "final")
         except BaseException:
             offload_to_cpu(policy)
             raise
@@ -732,6 +727,212 @@ def eval_policy_with_reward(
         trainer = None
         empty_cuda_cache()
 
+
+
+@dataclass
+class ConfigEval:
+    """Configuration for PPO training followed by policy evaluation."""
+
+    dataset_name: str = "Anthropic/hh-rlhf"
+    start_dataset: int = 0
+    end_dataset: int = 1000
+
+    policy_name: str = "Qwen/Qwen3-0.6B"
+    reward_model_name: str = "Skywork/Skywork-Reward-V2-Qwen3-0.6B"
+    reward_mode_name: str = "proxy"
+
+    epochs: float = 1.0
+    batch_size: int = 8
+    gradient_accumulation_steps: int = 8
+    rollout_forward_batch_size: int = 16
+    response_length: int = 128
+    policy_batch_size: int = 64
+    save_steps: int = 10
+
+    # This is a policy-only warm start, not an exact PPO resume. Optimizer,
+    # value-model, RNG, and dataloader state are not restored.
+    policy_checkpoint: str | Path | None = None
+    output_dir: str | Path | None = None
+
+
+@dataclass(frozen=True)
+class PolicySpec:
+    class_name: str = "PolicyModel"
+    model_name: str = "Qwen/Qwen3-0.6B"
+    lora_config: LoRASettings | None = field(default_factory=LoRASettings)
+    checkpoint: str | Path | None = None
+
+
+@dataclass(frozen=True)
+class RewardSpec:
+    class_name: str = "RewardModel"
+    model_name: str = "Skywork/Skywork-Reward-V2-Qwen3-0.6B"
+    mode_name: str = "proxy"
+
+
+@dataclass(frozen=True)
+class DatasetSpec:
+    class_name: str = "RequestDataset"
+    dataset_name: str = "Anthropic/hh-rlhf"
+    start: int = 0
+    end: int = 100
+    
+    
+@dataclass(frozen=True)
+class EvaluatorSpec:
+    class_name: str = "PrometheusEvaluator"
+    model_name: str = "prometheus-eval/prometheus-7b-v2.0"
+
+
+@dataclass(frozen=True)
+class TrainingPPOConfig:
+    policy: PolicySpec = field(default_factory=PolicySpec)
+    reward: RewardSpec = field(default_factory=RewardSpec)
+    dataset: DatasetSpec = field(default_factory=DatasetSpec)
+    output_dir: str | Path | None = None
+    epochs: float = 1.0
+    batch_size: int = 8
+    gradient_accumulation_steps: int = 8
+    rollout_forward_batch_size: int = 16
+    response_length: int = 128
+    generation_batch_size: int = 64
+    num_ppo_epochs: int = 4
+    num_mini_batches: int = 1
+    learning_rate: float = 3e-6
+    save_steps: int = 10
+    save_total_limit: int = 1
+    logging_steps: int = 10
+
+
+def _validate_training_ppo_config(config: TrainingPPOConfig) -> None:
+    if config.dataset.start < 0 or config.dataset.end <= config.dataset.start:
+        raise ValueError("dataset end must be greater than a non-negative start")
+    if config.epochs <= 0:
+        raise ValueError("epochs must be positive")
+    for name, value in (
+        ("batch_size", config.batch_size),
+        ("gradient_accumulation_steps", config.gradient_accumulation_steps),
+        ("rollout_forward_batch_size", config.rollout_forward_batch_size),
+        ("generation_batch_size", config.generation_batch_size),
+        ("response_length", config.response_length),
+        ("num_ppo_epochs", config.num_ppo_epochs),
+        ("num_mini_batches", config.num_mini_batches),
+        ("save_steps", config.save_steps),
+        ("save_total_limit", config.save_total_limit),
+        ("logging_steps", config.logging_steps),
+    ):
+        if value < 1:
+            raise ValueError(f"{name} must be at least 1")
+    if config.learning_rate <= 0:
+        raise ValueError("learning_rate must be positive")
+
+
+def temp_ppo_train_policy(config: TrainingPPOConfig) -> PolicyModel:
+    """Build configured components, train with PPO, and return policy on CPU."""
+    _validate_training_ppo_config(config)
+    training_output_dir = _ppo_output_directory(config)
+
+    raw_dataset = load_dataset(config.dataset.dataset_name)
+    dataset = DatasetFactory.create_from_raw(
+        config.dataset.class_name,
+        raw_dataset,
+        config.policy.model_name,
+        config.dataset.start,
+        config.dataset.end,
+    )
+    if not isinstance(dataset, RequestDataset):
+        raise TypeError("PPO training requires a RequestDataset")
+    if len(dataset) == 0:
+        raise ValueError("The selected PPO dataset range is empty")
+
+    policy = PolicyModelFactory.create_model(
+        config.policy.class_name,
+        config.policy.model_name,
+        config.policy.lora_config,
+        checkpoint=config.policy.checkpoint,
+        is_trainable=True,
+    )
+    reward = RewardModelFactory.create_model(
+        config.reward.class_name,
+        config.reward.model_name,
+        config.reward.mode_name,
+    )
+    return _train_policy(
+        policy,
+        reward,
+        dataset,
+        config,
+        training_output_dir,
+    )
+
+
+def _train_policy(
+    policy: PolicyModel,
+    reward: PPORewardModelProtocol,
+    dataset: RequestDataset,
+    config: TrainingPPOConfig,
+    training_output_dir: str,
+) -> PolicyModel:
+    reference_policy: PolicyModel | None = None
+    value_model: ValueModel | None = None
+    trainer: PolicyPPOTrainer | None = None
+    try:
+        if config.policy.checkpoint is not None and not isinstance(
+            policy.model,
+            PeftModel,
+        ):
+            reference_policy = PolicyModelFactory.create_model(
+                config.policy.class_name,
+                config.policy.model_name,
+                None,
+            )
+
+        value_model = ValueModel(config.policy.model_name)
+        ppo_config = PPOTrainingConfig(
+            output_dir=training_output_dir,
+            epochs=config.epochs,
+            batch_size=config.batch_size,
+            gradient_accumulation_steps=config.gradient_accumulation_steps,
+            rollout_forward_batch_size=config.rollout_forward_batch_size,
+            response_length=config.response_length,
+            num_ppo_epochs=config.num_ppo_epochs,
+            num_mini_batches=config.num_mini_batches,
+            learning_rate=config.learning_rate,
+            save_steps=config.save_steps,
+            save_total_limit=config.save_total_limit,
+            logging_steps=config.logging_steps,
+        )
+        trainer = PolicyPPOTrainer(
+            policy,
+            reward,
+            value_model,
+            dataset,
+            ppo_config,
+            reference_policy=reference_policy,
+        )
+        trainer.train()
+
+        policy.generate_new_dataset(
+            dataset,
+            batch_size=config.generation_batch_size,
+        )
+        policy.save_dataset(Path(training_output_dir) / "final")
+        policy.offload()
+        return policy
+    except BaseException:
+        offload_to_cpu(policy)
+        raise
+    finally:
+        offload_to_cpu(reference_policy)
+        offload_to_cpu(value_model)
+        offload_to_cpu(reward)
+        trainer = None
+        reference_policy = None
+        value_model = None
+        empty_cuda_cache()
+    
+    
+    
 
 
 def ppo_train_policy(config) -> PolicyModel:
@@ -851,6 +1052,7 @@ def ppo_train_policy(config) -> PolicyModel:
                 dataset,
                 batch_size=config.policy_batch_size,
             )
+            policy.save_dataset(Path(training_output_dir) / "final")
         except BaseException:
             offload_to_cpu(policy)
             raise
@@ -950,3 +1152,52 @@ def reward_similarity(dataset, policy: PolicyModel, proxy: RewardModel, judge: R
 
     print("small mean/std:", r_small.mean(), r_small.std())
     print("large mean/std:", r_large.mean(), r_large.std())
+
+
+
+@dataclass(frozen=True)
+class EvaluateConfig:
+    policy: PolicySpec
+    evaluator: EvaluatorSpec = field(
+        default_factory=lambda: EvaluatorSpec(
+            class_name="PrometheusEvaluator",
+            model_name="prometheus-eval/prometheus-7b-v2.0",
+        )
+    )
+    evaluator_batch_size: int = 1
+    evaluator_reset: bool = False
+
+
+
+def evaluate_policy(config: EvaluateConfig) -> float:
+    if config.policy.checkpoint is None:
+        raise ValueError("A policy checkpoint is required for evaluation")
+
+    policy = PolicyModelFactory.create_model(
+        config.policy.class_name,
+        config.policy.model_name,
+        config.policy.lora_config,
+        checkpoint=config.policy.checkpoint,
+        is_trainable=False,
+    )
+
+    if policy.dataset is None:
+        raise ValueError("The loaded policy checkpoint contains no dataset")
+
+    evaluator = EvaluatorModelFactory.create_model(
+        config.evaluator.class_name,
+        config.evaluator.model_name,
+    )
+
+    if not isinstance(evaluator, PrometheusEvaluator):
+        raise TypeError(
+            "This evaluation function currently requires PrometheusEvaluator"
+        )
+
+    return float(
+        evaluator.evaluate(
+            policy,
+            reset=config.evaluator_reset,
+            batch_size=config.evaluator_batch_size,
+        )
+    )

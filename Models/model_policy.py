@@ -48,6 +48,8 @@ class _CausalLanguageModel(Protocol):
 
 class PolicyModel(GenerateModel):
 
+    DATASET_FILE_NAME = "policy_dataset.json"
+
     @staticmethod
     def _configure_tokenizer(tokenizer: Any) -> None:
         if tokenizer.pad_token_id is None:
@@ -86,9 +88,23 @@ class PolicyModel(GenerateModel):
         self.dataset: RequestDataset | None = None
 
 
-    def save(self, path: str) -> None:
-        self.model.save_pretrained(path)
-        self.tokenizer.save_pretrained(path)
+    def save(self, path: str | Path) -> None:
+        destination = Path(path).expanduser()
+        destination.mkdir(parents=True, exist_ok=True)
+        self.model.save_pretrained(str(destination))
+        self.tokenizer.save_pretrained(destination)
+        self.save_dataset(destination)
+
+    def save_dataset(self, checkpoint_directory: str | Path) -> Path | None:
+        """Save the policy's complete in-memory dataset beside its weights."""
+        destination = (
+            Path(checkpoint_directory).expanduser() / self.DATASET_FILE_NAME
+        )
+        if self.dataset is None:
+            if destination.is_file():
+                destination.unlink()
+            return None
+        return self.dataset.save_full(destination)
 
 
     def move_to_current_device(self) -> torch.device:
@@ -344,18 +360,6 @@ class PolicyModel(GenerateModel):
         text = text[start: ]
         return text
     
-    
-    def generate_with_question(self, prompt: str) -> tuple:
-        answer = self.generate(prompt)
-        
-        full_text = f"""
-            Request: {prompt}
-            Model answer: {answer}
-        """
-        
-        logger.debug("%s: Policy model output: %s", NAME, full_text)
-        
-        return prompt, answer
 
 
     @classmethod
@@ -373,8 +377,9 @@ class PolicyModel(GenerateModel):
         ``adapter_config.json`` and adapter weights; for those checkpoints the
         base model is loaded first and the trained adapter is attached.
 
-        This restores policy weights only. It does not restore PPO optimizer,
-        scheduler, critic, RNG, or dataloader state.
+        If the checkpoint contains a policy dataset artifact, all of its
+        columns are restored. PPO optimizer, scheduler, critic, RNG, and
+        dataloader state are not restored.
         """
         checkpoint = Path(path).expanduser()
         if not checkpoint.exists():
@@ -427,7 +432,12 @@ class PolicyModel(GenerateModel):
         loaded.tokenizer = tokenizer
         loaded.model = cast(_CausalLanguageModel, model)
         loaded.model.to(device if device is not None else current_device())
-        loaded.dataset = None
+        dataset_path = checkpoint / cls.DATASET_FILE_NAME
+        loaded.dataset = (
+            RequestDataset.load_full(dataset_path, tokenizer=tokenizer)
+            if dataset_path.is_file()
+            else None
+        )
 
         if is_trainable:
             model.train()
@@ -449,3 +459,4 @@ class PolicyModel(GenerateModel):
 
         normalized_scores = (scores - mean) / std
         self.dataset[name] = normalized_scores.tolist()
+

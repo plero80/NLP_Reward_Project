@@ -6,7 +6,7 @@ from datasets import Dataset
 from transformers import PreTrainedModel
 
 from Models.model_policy import PolicyModel
-from Models.model_reward import RewardModel
+from Models.models import PPORewardModelProtocol
 from Models.runtime import current_device
 from Models.model_value import ValueModel
 
@@ -33,7 +33,7 @@ class PolicyPPOTrainer:
     def __init__(
         self,
         policy: PolicyModel,
-        reward: RewardModel,
+        reward: PPORewardModelProtocol,
         value: ValueModel,
         train_dataset: Dataset,
         config: PPOTrainingConfig,
@@ -171,7 +171,9 @@ class PolicyPPOTrainer:
 
         final_directory = Path(config.output_dir) / "final"
 
-        self.trainer.save_model(str(final_directory))
-        self.policy.tokenizer.save_pretrained(final_directory)
+        # TRL trains a PolicyAndValueWrapper. Saving that wrapper directly
+        # does not create a checkpoint that PolicyModel.load() can consume.
+        # Save the updated policy itself (plus tokenizer and current dataset).
+        self.policy.save(final_directory)
 
         return result

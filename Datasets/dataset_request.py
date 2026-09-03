@@ -1,4 +1,5 @@
 import logging
+import json
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,13 @@ class RequestDataset(Dataset):
         tokenizer_name: str,
         dic: dict[str, list[Any]] | None = None,
         do_dict: bool = False,
+        _tokenizer=None,
     ) -> None:
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer = (
+            _tokenizer
+            if _tokenizer is not None
+            else AutoTokenizer.from_pretrained(tokenizer_name)
+        )
         self.tokenizer_name = tokenizer_name
 
         if do_dict is True:
@@ -46,13 +52,24 @@ class RequestDataset(Dataset):
     
     
     @classmethod
-    def from_raw(cls, ds: Dataset , tokenizer_name: str):
+    def from_raw(
+        cls,
+        ds: Dataset,
+        tokenizer_name: str,
+        start: int = 0,
+        end: int | None = None,
+    ):
         requests = []
         ds_dict = ds["train"] if isinstance(ds, dict) else ds
+        chosen = ds_dict["chosen"]
+        if end is None:
+            end = len(chosen)
+        if start < 0 or end < start:
+            raise ValueError("end must be greater than or equal to start")
 
-        logger.info("We have %s examples", len(ds_dict["chosen"]))
+        logger.info("We have %s examples", end - start)
         # Find the human request in dataset.
-        for train_example in ds_dict["chosen"]:
+        for train_example in chosen[start:end]:
             
             request = cls._find_human_request(train_example)
             
@@ -105,6 +122,67 @@ class RequestDataset(Dataset):
 
     def save(self, path):
         torch.save(self.columns["prompts"], path)
+
+    def save_full(self, path: str | Path) -> Path:
+        """Save every dataset column in a safe, versioned JSON artifact."""
+        destination = Path(path).expanduser()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "format_version": 1,
+            "tokenizer_name": self.tokenizer_name,
+            "columns": self.columns,
+        }
+        try:
+            serialized = json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "RequestDataset columns must contain JSON-compatible values"
+            ) from error
+        destination.write_text(serialized + "\n", encoding="utf-8")
+        return destination
+
+    @classmethod
+    def load_full(
+        cls,
+        path: str | Path,
+        *,
+        tokenizer=None,
+    ) -> "RequestDataset":
+        """Load a dataset created by :meth:`save_full`."""
+        source = Path(path).expanduser()
+        try:
+            payload = json.loads(source.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"Policy dataset is not valid JSON: {source}"
+            ) from error
+        if not isinstance(payload, dict):
+            raise ValueError("Policy dataset JSON must contain an object")
+        required_fields = {"format_version", "tokenizer_name", "columns"}
+        if set(payload) != required_fields:
+            raise ValueError(
+                "Policy dataset fields must be exactly: "
+                f"{sorted(required_fields)}"
+            )
+        if payload["format_version"] != 1:
+            raise ValueError(
+                "Unsupported policy dataset format_version: "
+                f"{payload['format_version']!r}"
+            )
+        tokenizer_name = payload["tokenizer_name"]
+        columns = payload["columns"]
+        if not isinstance(tokenizer_name, str) or not tokenizer_name:
+            raise ValueError("Policy dataset tokenizer_name must be a string")
+        if not isinstance(columns, dict):
+            raise ValueError("Policy dataset columns must be an object")
+
+        return cls.from_dict(columns, tokenizer_name, tokenizer=tokenizer)
         
         
     def get_list(self,name: str, start:int, end:int) -> list[str]:
@@ -117,7 +195,7 @@ class RequestDataset(Dataset):
 
 
     @classmethod
-    def from_dict(cls, dic: dict, tokenizer_name: str):
+    def from_dict(cls, dic: dict, tokenizer_name: str, *, tokenizer=None):
         """Assuming that list given already filtered"""
 
         if "prompts" not in dic:
@@ -135,7 +213,7 @@ class RequestDataset(Dataset):
                     f"column {name} has {len(values)} items, expected {prompt_count}"
                 )
 
-        return cls([], tokenizer_name, dic, True)
+        return cls([], tokenizer_name, dic, True, _tokenizer=tokenizer)
         
         
     @classmethod
