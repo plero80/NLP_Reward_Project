@@ -741,8 +741,7 @@ def eval_policy_with_reward(
 def get_gap_calibration(
     dataset,
     policy: PolicyModel,
-    proxy: RewardModel,
-    judge: RewardModel,
+    config: ConfigTrainClassifier,
     quantile: float = 0.95,
     policy_batch_size: int = 64,
     proxy_batch_size: int = 64,
@@ -757,12 +756,16 @@ def get_gap_calibration(
     offload_to_cpu(policy)
     empty_cuda_cache()
 
+
+    proxy = RewardModel(config.reward_model_name, config.reward_mode_name)
+    
     try:
         proxy.score_policy(policy, proxy_batch_size)
     finally:
         offload_to_cpu(proxy)
         empty_cuda_cache()
 
+    judge = RewardModel(config.judge_model_name, config.judge_mode_name)
     try:
         judge.score_policy(policy, judge_batch_size)
     finally:
