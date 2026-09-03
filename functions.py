@@ -23,6 +23,7 @@ import Models.model_evaluator as model_evaluator
 from Models.model_policy import PolicyModel
 from Models.model_reward import RewardModel
 from Models.model_value import ValueModel
+from Models.model_evaluator import PrometheusEvaluator
 from Trainers.trainer_classifier import (
     ClassifierTrainer,
     ClassifierTrainingConfig,
