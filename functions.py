@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 import gc
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -86,6 +88,23 @@ def latest_ppo_checkpoint(output_dir: str | Path) -> str:
     return checkpoint
 
 
+@dataclass(frozen=True)
+class PolicySpec:
+    class_name: str = "PolicyModel"
+    model_name: str = "Qwen/Qwen3-0.6B"
+    lora_config: LoRASettings | None = field(default_factory=LoRASettings)
+    checkpoint: str | Path | None = None
+
+
+@dataclass(frozen=True)
+class RewardSpec:
+    class_name: str = "RewardModel"
+    model_name: str = "Skywork/Skywork-Reward-V2-Qwen3-0.6B"
+    mode_name: str = "proxy"
+    mean: float | None = None
+    std: float | None = None
+
+
 
 
 
@@ -94,15 +113,16 @@ class ConfigTrainClassifier:
     """Configuration for generating and training a reward-gap classifier."""
 
     dataset_name: str = "Anthropic/hh-rlhf"
-    policy_load_path: str | Path | None = None
-    policy_name: str = "Qwen/Qwen3-0.6B"
+    policy: PolicySpec = field(default_factory=PolicySpec)
+    reward: RewardSpec = field(default_factory=RewardSpec)
+    judge: RewardSpec = field(
+        default_factory=lambda: RewardSpec(
+            model_name="Skywork/Skywork-Reward-V2-Qwen3-4B",
+            mode_name="judge",
+        )
+    )
     start_dataset: int = 0
     end_dataset: int = 1000
-
-    reward_model_name: str = "Skywork/Skywork-Reward-V2-Qwen3-0.6B"
-    reward_mode_name: str = "proxy"
-    judge_model_name: str = "Skywork/Skywork-Reward-V2-Qwen3-4B"
-    judge_mode_name: str = "judge"
 
     generation_batch_size: int = 64
     reward_batch_size: int = 64
@@ -126,8 +146,20 @@ def _validate_classifier_config(config: ConfigTrainClassifier) -> None:
         raise ValueError("start_dataset must be non-negative")
     if config.end_dataset <= config.start_dataset:
         raise ValueError("end_dataset must be greater than start_dataset")
-    if config.reward_mode_name == config.judge_mode_name:
-        raise ValueError("reward_mode_name and judge_mode_name must be different")
+    if config.reward.mode_name == config.judge.mode_name:
+        raise ValueError(
+            "reward.mode_name and judge.mode_name must be different"
+        )
+    for name, spec in (("reward", config.reward), ("judge", config.judge)):
+        if (spec.mean is None) != (spec.std is None):
+            raise ValueError(
+                f"{name}.mean and {name}.std must be provided together"
+            )
+        if spec.mean is not None and spec.std is not None:
+            if not np.isfinite(spec.mean) or not np.isfinite(spec.std):
+                raise ValueError(f"{name} normalization values must be finite")
+            if spec.std <= _NORMALIZATION_EPSILON:
+                raise ValueError(f"{name}.std must be greater than zero")
 
     positive_sizes = {
         "generation_batch_size": config.generation_batch_size,
@@ -250,10 +282,15 @@ def _generate_policy_rows(
     try:
         if supplied_policy is not None:
             policy = supplied_policy
-        elif reference or config.policy_load_path is None:
-            policy = PolicyModel(config.policy_name)
         else:
-            policy = PolicyModel.load(config.policy_load_path)
+            checkpoint = None if reference else config.policy.checkpoint
+            policy = PolicyModelFactory.create_model(
+                config.policy.class_name,
+                config.policy.model_name,
+                config.policy.lora_config,
+                checkpoint=checkpoint,
+                is_trainable=False,
+            )
         policy.generate_new_dataset(
             request_dataset,
             batch_size=config.generation_batch_size,
@@ -296,49 +333,72 @@ def _finite_score_array(
     return array
 
 
-def _score_reference_and_target(
+def _score_policy_rows(
     *,
-    model_name: str,
-    mode_name: str,
+    spec: RewardSpec,
     batch_size: int,
     max_length: int,
-    reference_rows: PolicyRows | None,
-    target_rows: PolicyRows,
-) -> tuple[np.ndarray | None, np.ndarray]:
-    scorer: RewardModel | None = None
+    row_groups: dict[str, PolicyRows],
+) -> dict[str, np.ndarray]:
+    scorer: object | None = None
     try:
-        scorer = RewardModel(model_name, mode_name)
-        reference_scores = (
-            _finite_score_array(
-                scorer.score(
-                    reference_rows[0],
-                    reference_rows[1],
-                    batch_size=batch_size,
-                    max_length=max_length,
-                ),
-                expected_size=len(reference_rows[0]),
-                label=f"reference {mode_name}",
+        scorer = RewardModelFactory.create_model(
+            spec.class_name,
+            spec.model_name,
+            spec.mode_name,
+            mean=spec.mean,
+            std=spec.std,
+        )
+        score = getattr(scorer, "score", None)
+        if not callable(score):
+            raise TypeError(
+                f"Reward class {spec.class_name!r} cannot score prompt/answer "
+                "batches for classifier creation"
             )
-            if reference_rows is not None
-            else None
-        )
-        target_scores = _finite_score_array(
-            scorer.score(
-                target_rows[0],
-                target_rows[1],
-                batch_size=batch_size,
-                max_length=max_length,
-            ),
-            expected_size=len(target_rows[0]),
-            label=f"target {mode_name}",
-        )
-        return reference_scores, target_scores
+        score_options = {
+            "batch_size": batch_size,
+            "max_length": max_length,
+        }
+        # Classifier labels use their own frozen GapCalibration below, so
+        # collect raw scores even when the reward carries PPO normalization.
+        return {
+            label: _finite_score_array(
+                score(
+                    rows[0],
+                    rows[1],
+                    **score_options,
+                ),
+                expected_size=len(rows[0]),
+                label=f"{label} {spec.mode_name}",
+            )
+            for label, rows in row_groups.items()
+        }
     except BaseException:
         offload_to_cpu(scorer)
         raise
     finally:
         scorer = None
         empty_cuda_cache()
+
+
+def _score_reference_and_target(
+    *,
+    spec: RewardSpec,
+    batch_size: int,
+    max_length: int,
+    reference_rows: PolicyRows | None,
+    target_rows: PolicyRows,
+) -> tuple[np.ndarray | None, np.ndarray]:
+    row_groups = {"target": target_rows}
+    if reference_rows is not None:
+        row_groups = {"reference": reference_rows, **row_groups}
+    scores = _score_policy_rows(
+        spec=spec,
+        batch_size=batch_size,
+        max_length=max_length,
+        row_groups=row_groups,
+    )
+    return scores.get("reference"), scores["target"]
 
 
 def _build_gap_calibration(
@@ -391,6 +451,69 @@ def _build_gap_calibration(
     return calibration
 
 
+def calculate_gap_calibration(
+    config: ConfigTrainClassifier | None = None,
+) -> GapCalibration:
+    """Calculate frozen proxy/judge normalization from the reference policy."""
+    config = config or ConfigTrainClassifier()
+    _validate_classifier_config(config)
+
+    raw_dataset = load_dataset(config.dataset_name)
+    request_dataset = RequestDataset.from_raw(
+        raw_dataset,
+        config.policy.model_name,
+    )
+    request_dataset.truncate(config.start_dataset, config.end_dataset)
+    if len(request_dataset) == 0:
+        raise ValueError("The selected calibration dataset range is empty")
+
+    reference_rows = _generate_policy_rows(
+        config,
+        request_dataset,
+        reference=True,
+    )
+    proxy_scores = _score_policy_rows(
+        spec=config.reward,
+        batch_size=config.reward_batch_size,
+        max_length=config.score_max_length,
+        row_groups={"reference": reference_rows},
+    )["reference"]
+    judge_scores = _score_policy_rows(
+        spec=config.judge,
+        batch_size=config.judge_batch_size,
+        max_length=config.score_max_length,
+        row_groups={"reference": reference_rows},
+    )["reference"]
+    return _build_gap_calibration(
+        proxy_scores,
+        judge_scores,
+        config.calibration_quantile,
+    )
+
+
+def _policy_source_label(
+    config: ConfigTrainClassifier,
+    policy: PolicyModel | None,
+) -> str:
+    checkpoint = (
+        getattr(policy, "checkpoint_path", None)
+        if policy is not None
+        else config.policy.checkpoint
+    )
+    if checkpoint is not None:
+        checkpoint_path = Path(checkpoint)
+        source = (
+            checkpoint_path.parent.name
+            if checkpoint_path.name.casefold() == "final"
+            else checkpoint_path.name
+        )
+    else:
+        source = Path(config.policy.model_name).name
+
+    safe_source = re.sub(r"[^A-Za-z0-9._-]+", "_", source).strip("._-")
+    return safe_source or "unknown"
+
+
 def create_classifier(
     config: ConfigTrainClassifier | None = None,
     *,
@@ -400,15 +523,15 @@ def create_classifier(
     """Train a classifier using a frozen reference reward-gap calibration."""
     config = config or ConfigTrainClassifier()
     _validate_classifier_config(config)
-    if policy is not None and config.policy_load_path is not None:
+    if policy is not None and config.policy.checkpoint is not None:
         raise ValueError(
-            "Pass either policy or config.policy_load_path, not both"
+            "Pass either policy or config.policy.checkpoint, not both"
         )
 
     raw_dataset = load_dataset(config.dataset_name)
     request_dataset = RequestDataset.from_raw(
         raw_dataset,
-        config.policy_name,
+        config.policy.model_name,
     )
     request_dataset.truncate(
         config.start_dataset,
@@ -434,16 +557,14 @@ def create_classifier(
     )
 
     reference_proxy, target_proxy = _score_reference_and_target(
-        model_name=config.reward_model_name,
-        mode_name=config.reward_mode_name,
+        spec=config.reward,
         batch_size=config.reward_batch_size,
         max_length=config.score_max_length,
         reference_rows=reference_rows,
         target_rows=target_rows,
     )
     reference_judge, target_judge = _score_reference_and_target(
-        model_name=config.judge_model_name,
-        mode_name=config.judge_mode_name,
+        spec=config.judge,
         batch_size=config.judge_batch_size,
         max_length=config.score_max_length,
         reference_rows=reference_rows,
@@ -499,8 +620,11 @@ def create_classifier(
             f"calibration threshold; class counts: {class_counts}"
         )
 
+    policy_source = _policy_source_label(config, policy)
     run_directory = (
-        Path(config.classifier_output_root) / f"id={artifact_id}"
+        Path(config.classifier_output_root)
+        / f"policy={policy_source}"
+        / f"id={artifact_id}"
     )
     dataset_path = classifier_dataset.save(run_directory / "dataset.json")
     logger.info("Saved classifier dataset to %s", dataset_path)
@@ -525,6 +649,7 @@ def create_classifier(
         classifier = Classifier(
             config.classifier_model_name,
             classifier_id=artifact_id,
+            source_policy=policy_source,
         )
         training_config = ClassifierTrainingConfig(
             output_dir=str(run_directory),
@@ -760,21 +885,6 @@ class ConfigEval:
 
 
 @dataclass(frozen=True)
-class PolicySpec:
-    class_name: str = "PolicyModel"
-    model_name: str = "Qwen/Qwen3-0.6B"
-    lora_config: LoRASettings | None = field(default_factory=LoRASettings)
-    checkpoint: str | Path | None = None
-
-
-@dataclass(frozen=True)
-class RewardSpec:
-    class_name: str = "RewardModel"
-    model_name: str = "Skywork/Skywork-Reward-V2-Qwen3-0.6B"
-    mode_name: str = "proxy"
-
-
-@dataclass(frozen=True)
 class DatasetSpec:
     class_name: str = "RequestDataset"
     dataset_name: str = "Anthropic/hh-rlhf"
@@ -833,7 +943,11 @@ def _validate_training_ppo_config(config: TrainingPPOConfig) -> None:
         raise ValueError("learning_rate must be positive")
 
 
-def temp_ppo_train_policy(config: TrainingPPOConfig) -> PolicyModel:
+def temp_ppo_train_policy(
+    config: TrainingPPOConfig,
+    *,
+    classifiers: Sequence[Classifier] = (),
+) -> PolicyModel:
     """Build configured components, train with PPO, and return policy on CPU."""
     _validate_training_ppo_config(config)
     training_output_dir = _ppo_output_directory(config)
@@ -860,16 +974,18 @@ def temp_ppo_train_policy(config: TrainingPPOConfig) -> PolicyModel:
     )
     
     
-    classifiers = []
+    reward_classifiers = list(classifiers)
     for classifier_path in config.classifier_load:
-        classifiers.append(Classifier.load(classifier_path))
+        reward_classifiers.append(Classifier.load(classifier_path))
     
     
     reward = RewardModelFactory.create_model(
         config.reward.class_name,
         config.reward.model_name,
         config.reward.mode_name,
-        classifiers,
+        reward_classifiers,
+        mean=config.reward.mean,
+        std=config.reward.std,
     )
     
     return _train_policy(

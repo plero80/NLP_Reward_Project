@@ -32,6 +32,7 @@ def test_classifier_save_and_load_preserves_identity(
     classifier.tokenizer = tokenizer
     classifier.model = model
     classifier.id = "stable-classifier-id"
+    classifier.source_policy = "proxy_0_200"
 
     saved_path = classifier.save(checkpoint)
 
@@ -53,3 +54,6 @@ def test_classifier_save_and_load_preserves_identity(
     assert loaded.model is model
     assert loaded.tokenizer is tokenizer
     assert loaded.model.training is False
+    assert loaded.source_policy == "proxy_0_200"
+    assert classifier.checkpoint_path == checkpoint
+    assert loaded.checkpoint_path == checkpoint

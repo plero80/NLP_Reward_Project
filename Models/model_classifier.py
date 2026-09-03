@@ -29,6 +29,7 @@ class Classifier(BinaryClassifier):
         self,
         model_name: str,
         classifier_id: str | None = None,
+        source_policy: str | None = None,
     ) -> None:
         
         self.model_name = model_name
@@ -41,6 +42,8 @@ class Classifier(BinaryClassifier):
         )
         self.model.to(current_device())
         self.id = classifier_id or str(uuid4())
+        self.source_policy = source_policy
+        self.checkpoint_path: Path | None = None
 
     def save(self, path: str | Path) -> Path:
         """Save a loadable classifier, tokenizer, and stable classifier ID."""
@@ -55,6 +58,7 @@ class Classifier(BinaryClassifier):
                     "format_version": 1,
                     "classifier_id": self.id,
                     "model_name": self.model_name,
+                    "source_policy": self.source_policy,
                 },
                 indent=2,
                 sort_keys=True,
@@ -62,6 +66,7 @@ class Classifier(BinaryClassifier):
             + "\n",
             encoding="utf-8",
         )
+        self.checkpoint_path = destination
         return destination
 
     @classmethod
@@ -116,6 +121,7 @@ class Classifier(BinaryClassifier):
             model_name = checkpoint_source
 
         classifier_id = checkpoint.name
+        source_policy = None
         metadata_path = checkpoint / cls.METADATA_FILE_NAME
         if metadata_path.is_file():
             try:
@@ -137,6 +143,15 @@ class Classifier(BinaryClassifier):
             stored_model_name = metadata.get("model_name")
             if isinstance(stored_model_name, str) and stored_model_name:
                 model_name = stored_model_name
+            stored_source_policy = metadata.get("source_policy")
+            if stored_source_policy is not None and not isinstance(
+                stored_source_policy,
+                str,
+            ):
+                raise ValueError(
+                    "Classifier metadata has an invalid source policy"
+                )
+            source_policy = stored_source_policy
 
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
         loaded = cls.__new__(cls)
@@ -146,6 +161,8 @@ class Classifier(BinaryClassifier):
         loaded.model.to(device if device is not None else current_device())
         loaded.model.eval()
         loaded.id = classifier_id
+        loaded.source_policy = source_policy
+        loaded.checkpoint_path = checkpoint
         return loaded
         
         

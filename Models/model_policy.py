@@ -86,6 +86,7 @@ class PolicyModel(GenerateModel):
         self.model = cast(_CausalLanguageModel, model)
         self.model.to(current_device())
         self.dataset: RequestDataset | None = None
+        self.checkpoint_path: Path | None = None
 
 
     def save(self, path: str | Path) -> None:
@@ -94,6 +95,7 @@ class PolicyModel(GenerateModel):
         self.model.save_pretrained(str(destination))
         self.tokenizer.save_pretrained(destination)
         self.save_dataset(destination)
+        self.checkpoint_path = destination
 
     def save_dataset(self, checkpoint_directory: str | Path) -> Path | None:
         """Save the policy's complete in-memory dataset beside its weights."""
@@ -432,6 +434,7 @@ class PolicyModel(GenerateModel):
         loaded.tokenizer = tokenizer
         loaded.model = cast(_CausalLanguageModel, model)
         loaded.model.to(device if device is not None else current_device())
+        loaded.checkpoint_path = checkpoint
         dataset_path = checkpoint / cls.DATASET_FILE_NAME
         loaded.dataset = (
             RequestDataset.load_full(dataset_path, tokenizer=tokenizer)

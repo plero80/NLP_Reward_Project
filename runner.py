@@ -394,11 +394,12 @@ class Runner:
             "reward_gap_classifier",
         )
         classifier = Classifier(
-            name=classifier_name,
             model_name=(
                 getattr(self.config, "classifier_model_name", None)
                 or self.config.reward_name
             ),
+            classifier_id=classifier_name,
+            source_policy=Path(self._ppo_config().output_dir).name,
         )
         classifier_trainer = ClassifierTrainer(
             classifier,

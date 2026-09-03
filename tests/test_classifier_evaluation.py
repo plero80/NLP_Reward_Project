@@ -256,6 +256,31 @@ class CompositeRewardTests(unittest.TestCase):
             torch.allclose(adjusted, torch.full_like(adjusted, expected))
         )
 
+    def test_normalization_is_applied_to_ppo_reward_logits(self) -> None:
+        class Backbone(torch.nn.Module):
+            def forward(self, input_ids, **kwargs):
+                hidden = torch.full((*input_ids.shape, 1), 2.0)
+                return type("Output", (), {"hidden_states": [hidden]})()
+
+        class Reward(torch.nn.Module):
+            base_model_prefix = "core"
+
+            def __init__(self):
+                super().__init__()
+                self.core = Backbone()
+                self.config = type("Config", (), {})()
+
+            def score(self, hidden_states):
+                return hidden_states
+
+        model = CompositeRewardModel(Reward(), [], mean=1.0, std=0.5)
+        output = model.backbone(input_ids=torch.tensor([[1, 2, 3]]))
+        normalized = model.score(output.hidden_states[-1])
+
+        self.assertTrue(
+            torch.allclose(normalized, torch.full_like(normalized, 2.0))
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

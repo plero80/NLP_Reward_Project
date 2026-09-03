@@ -75,6 +75,7 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
         "first": object(),
         "second": object(),
     }
+    in_memory_classifier = object()
 
     monkeypatch.setattr(
         functions,
@@ -100,12 +101,22 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
         )
         return policy
 
-    def create_reward(class_name, model_name, mode_name, classifiers):
+    def create_reward(
+        class_name,
+        model_name,
+        mode_name,
+        classifiers,
+        *,
+        mean,
+        std,
+    ):
         calls["reward"] = (
             class_name,
             model_name,
             mode_name,
             tuple(classifiers),
+            mean,
+            std,
         )
         return reward
 
@@ -143,6 +154,8 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
             class_name="DeterministicReward",
             model_name="policy/model",
             mode_name="proxy",
+            mean=1.25,
+            std=0.5,
         ),
         dataset=functions.DatasetSpec(
             class_name="RequestDataset",
@@ -155,7 +168,10 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
         generation_batch_size=12,
     )
 
-    result = functions.temp_ppo_train_policy(config)
+    result = functions.temp_ppo_train_policy(
+        config,
+        classifiers=(in_memory_classifier,),
+    )
 
     assert result is policy
     assert calls["loaded_dataset"] == "dataset/name"
@@ -177,9 +193,12 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
         "policy/model",
         "proxy",
         (
+            in_memory_classifier,
             loaded_classifiers["first"],
             loaded_classifiers["second"],
         ),
+        1.25,
+        0.5,
     )
     assert policy.generated == (dataset, 12)
     assert policy.dataset_save_path == tmp_path / "ppo" / "final"

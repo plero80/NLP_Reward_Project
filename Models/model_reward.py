@@ -84,9 +84,22 @@ class CompositeRewardModel(torch.nn.Module):
         self,
         reward_model: torch.nn.Module,
         classifiers: list[torch.nn.Module],
+        mean: float | None = None,
+        std: float | None = None,
     ) -> None:
         super().__init__()
+        if (mean is None) != (std is None):
+            raise ValueError("mean and std must be provided together")
+        if mean is not None and std is not None:
+            mean = float(mean)
+            std = float(std)
+            if not math.isfinite(mean) or not math.isfinite(std):
+                raise ValueError("Reward normalization values must be finite")
+            if std <= 1e-8:
+                raise ValueError("std must be greater than zero")
         self.config = reward_model.config
+        self.mean = mean
+        self.std = std
         self._state = SimpleNamespace(penalties=None)
         self.backbone = _CompositeRewardBackbone(
             reward_model,
@@ -96,6 +109,8 @@ class CompositeRewardModel(torch.nn.Module):
 
     def score(self, hidden_states: torch.Tensor) -> torch.Tensor:
         reward_logits = self.backbone.reward_model.score(hidden_states)
+        if self.mean is not None and self.std is not None:
+            reward_logits = (reward_logits.float() - self.mean) / self.std
         penalties = self._state.penalties
         if penalties is None:
             raise RuntimeError("Composite reward backbone must run before score")
@@ -196,7 +211,7 @@ class RewardModel(ScoreModel):
         
         
     def load_classifier(self, name: str, path: str) -> None:
-        classifier = Classifier(name=name, model_name=path)
+        classifier = Classifier.load(path)
         classifier.model.to(self.model.device)
         classifier.model.eval()
 
@@ -211,14 +226,19 @@ class RewardModel(ScoreModel):
 
     def for_ppo(self) -> torch.nn.Module:
         """Return the base or classifier-adjusted model expected by TRL PPO."""
-        if not self.classifiers:
+        if not self.classifiers and self.mean is None:
             self.model.eval()
             return self.model
         classifier_models = [
             entry["classifier"].model
             for entry in self.classifiers
         ]
-        composite_model = CompositeRewardModel(self.model, classifier_models)
+        composite_model = CompositeRewardModel(
+            self.model,
+            classifier_models,
+            mean=self.mean,
+            std=self.std,
+        )
         composite_model.eval()
         return composite_model
         
@@ -555,7 +575,21 @@ class DeterministicPPORewardModule(torch.nn.Module):
       
         
 class DeterministicReward:
-    def __init__(self, model_name: str) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        ref_mean: float | None = None,
+        ref_std: float | None = None,
+    ) -> None:
+        if (ref_mean is None) != (ref_std is None):
+            raise ValueError("ref_mean and ref_std must be provided together")
+        if ref_mean is not None and ref_std is not None:
+            ref_mean = float(ref_mean)
+            ref_std = float(ref_std)
+            if not math.isfinite(ref_mean) or not math.isfinite(ref_std):
+                raise ValueError("Reference normalization values must be finite")
+            if ref_std <= 1e-8:
+                raise ValueError("ref_std must be greater than zero")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         language_model = AutoModelForCausalLM.from_pretrained(
             model_name,
@@ -569,6 +603,8 @@ class DeterministicReward:
             embedding,
         )
         self.model.to(current_device())
+        self.mean = ref_mean
+        self.std = ref_std
 
     def calculate_reward(self, text: str) -> float:
         inputs = self.tokenizer(text, return_tensors="pt")
@@ -598,13 +634,18 @@ class DeterministicReward:
         )
 
     def for_ppo(self) -> torch.nn.Module:
-        if not self.classifiers:
+        if not self.classifiers and self.mean is None:
             self.model.eval()
             return self.model
         classifier_models = [
             entry["classifier"].model for entry in self.classifiers
         ]
-        composite_model = CompositeRewardModel(self.model, classifier_models)
+        composite_model = CompositeRewardModel(
+            self.model,
+            classifier_models,
+            mean=self.mean,
+            std=self.std,
+        )
         composite_model.eval()
         return composite_model
 

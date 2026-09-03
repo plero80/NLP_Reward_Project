@@ -85,7 +85,12 @@ def test_reward_factory_attaches_loaded_classifiers(monkeypatch) -> None:
         add_classifier=lambda *args: attached.append(args),
     )
     builders = dict(RewardModelFactory._builders)
-    builders["RewardModel"] = lambda _model, _mode: reward
+    received_normalization = []
+    builders["RewardModel"] = (
+        lambda _model, _mode, mean, std: (
+            received_normalization.append((mean, std)) or reward
+        )
+    )
     monkeypatch.setattr(RewardModelFactory, "_builders", builders)
     classifier = SimpleNamespace(
         id="classifier-id",
@@ -97,7 +102,10 @@ def test_reward_factory_attaches_loaded_classifiers(monkeypatch) -> None:
         "reward/model",
         "proxy",
         [classifier],
+        mean=2.5,
+        std=0.75,
     )
 
     assert created is reward
+    assert received_normalization == [(2.5, 0.75)]
     assert attached == [("classifier-id", classifier, "tokenizer")]

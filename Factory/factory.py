@@ -1,4 +1,5 @@
 from collections.abc import Callable, Sequence
+import math
 from pathlib import Path
 from typing import Any, Literal, overload
 
@@ -15,13 +16,18 @@ from Models.models import PPORewardModelProtocol
 
 
 class RewardModelFactory:
-    _builders: dict[str, Callable[[str, str], PPORewardModelProtocol]] = {
-        "RewardModel": lambda model_name, mode_name: RewardModel(
+    _builders: dict[
+        str,
+        Callable[[str, str, float | None, float | None], PPORewardModelProtocol],
+    ] = {
+        "RewardModel": lambda model_name, mode_name, mean, std: RewardModel(
             model_name,
             mode_name,
+            ref_mean=mean,
+            ref_std=std,
         ),
-        "DeterministicReward": lambda model_name, _mode_name: (
-            DeterministicReward(model_name)
+        "DeterministicReward": lambda model_name, _mode_name, mean, std: (
+            DeterministicReward(model_name, ref_mean=mean, ref_std=std)
         ),
     }
 
@@ -32,7 +38,20 @@ class RewardModelFactory:
         model_name: str,
         mode_name: str,
         classifiers: Sequence[Classifier] = (),
+        *,
+        mean: float | None = None,
+        std: float | None = None,
     ) -> PPORewardModelProtocol:
+        if (mean is None) != (std is None):
+            raise ValueError("mean and std must be provided together")
+        if mean is not None and std is not None:
+            mean = float(mean)
+            std = float(std)
+            if not math.isfinite(mean) or not math.isfinite(std):
+                raise ValueError("Reward normalization values must be finite")
+            if std <= 1e-8:
+                raise ValueError("std must be greater than zero")
+
         try:
             builder = cls._builders[class_name]
         except KeyError:
@@ -42,7 +61,7 @@ class RewardModelFactory:
                 f"Available classes: {available}"
             ) from None
 
-        reward = builder(model_name, mode_name)
+        reward = builder(model_name, mode_name, mean, std)
         for classifier in classifiers:
             reward.add_classifier(
                 classifier.id,

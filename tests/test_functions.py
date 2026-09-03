@@ -1,6 +1,7 @@
 from dataclasses import replace
 import inspect
 import logging
+from pathlib import Path
 
 import pytest
 import torch
@@ -49,6 +50,25 @@ def test_offload_to_cpu_also_offloads_attached_classifiers() -> None:
     assert classifier_model.weight.device.type == "cpu"
 
 
+def test_policy_source_label_uses_ppo_run_directory() -> None:
+    policy = type(
+        "SavedPolicy",
+        (),
+        {
+            "checkpoint_path": Path(
+                "outputs/ppo_policy/my-ppo-run/final"
+            ),
+        },
+    )()
+
+    label = functions._policy_source_label(
+        functions.ConfigTrainClassifier(),
+        policy,
+    )
+
+    assert label == "my-ppo-run"
+
+
 def test_classifier_config_rejects_an_empty_range() -> None:
     config = replace(
         functions.ConfigTrainClassifier(),
@@ -57,6 +77,17 @@ def test_classifier_config_rejects_an_empty_range() -> None:
     )
 
     with pytest.raises(ValueError, match="end_dataset"):
+        functions.create_classifier(config)
+
+
+def test_classifier_config_rejects_incomplete_reward_normalization() -> None:
+    base = functions.ConfigTrainClassifier()
+    config = replace(
+        base,
+        reward=replace(base.reward, mean=1.0),
+    )
+
+    with pytest.raises(ValueError, match="reward.mean and reward.std"):
         functions.create_classifier(config)
 
 
@@ -86,6 +117,60 @@ def test_gap_calibration_load_rejects_invalid_std(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="proxy_std"):
         functions.GapCalibration.load(path)
+
+
+def test_calculate_gap_calibration_scores_reference_policy_once_per_model(
+    monkeypatch,
+) -> None:
+    class FakeRequestDataset:
+        @classmethod
+        def from_raw(cls, raw_dataset, tokenizer_name):
+            assert raw_dataset == "raw"
+            assert tokenizer_name == "policy/model"
+            return cls()
+
+        def truncate(self, start, end):
+            assert (start, end) == (0, 4)
+
+        def __len__(self):
+            return 4
+
+    rows = (["p0", "p1", "p2", "p3"], ["a0", "a1", "a2", "a3"])
+    score_calls = []
+
+    def score_policy_rows(*, spec, batch_size, max_length, row_groups):
+        score_calls.append((spec.mode_name, tuple(row_groups)))
+        values = (
+            [-1.0, 1.0, -1.0, 1.0]
+            if spec.mode_name == "proxy"
+            else [-1.0, 1.0, 1.0, -1.0]
+        )
+        return {"reference": functions.np.asarray(values)}
+
+    monkeypatch.setattr(functions, "load_dataset", lambda _name: "raw")
+    monkeypatch.setattr(functions, "RequestDataset", FakeRequestDataset)
+    monkeypatch.setattr(
+        functions,
+        "_generate_policy_rows",
+        lambda *_args, **_kwargs: rows,
+    )
+    monkeypatch.setattr(functions, "_score_policy_rows", score_policy_rows)
+
+    config = functions.ConfigTrainClassifier(
+        policy=functions.PolicySpec(model_name="policy/model"),
+        start_dataset=0,
+        end_dataset=4,
+    )
+    calibration = functions.calculate_gap_calibration(config)
+
+    assert score_calls == [
+        ("proxy", ("reference",)),
+        ("judge", ("reference",)),
+    ]
+    assert calibration.proxy_mean == pytest.approx(0.0)
+    assert calibration.proxy_std == pytest.approx(1.0)
+    assert calibration.judge_mean == pytest.approx(0.0)
+    assert calibration.judge_std == pytest.approx(1.0)
 
 
 def test_warm_start_cannot_overwrite_its_source_directory(tmp_path) -> None:
@@ -197,9 +282,11 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
             self,
             model_name: str,
             classifier_id: str | None = None,
+            source_policy: str | None = None,
         ) -> None:
             self.model_name = model_name
             self.id = classifier_id
+            self.source_policy = source_policy
             self.model = torch.nn.Linear(1, 2)
 
     class FakeClassifierTrainer:
@@ -217,15 +304,27 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
 
     monkeypatch.setattr(functions, "load_dataset", lambda name: "raw")
     monkeypatch.setattr(functions, "RequestDataset", FakeRequestDataset)
-    monkeypatch.setattr(functions, "PolicyModel", FakePolicy)
-    monkeypatch.setattr(functions, "RewardModel", FakeRewardModel)
+    monkeypatch.setattr(
+        functions.PolicyModelFactory,
+        "create_model",
+        lambda _class_name, model_name, _lora, **_kwargs: FakePolicy(
+            model_name
+        ),
+    )
+    monkeypatch.setattr(
+        functions.RewardModelFactory,
+        "create_model",
+        lambda _class_name, model_name, mode_name, **_kwargs: (
+            FakeRewardModel(model_name, mode_name)
+        ),
+    )
     monkeypatch.setattr(functions, "Classifier", FakeClassifier)
     monkeypatch.setattr(functions, "ClassifierTrainer", FakeClassifierTrainer)
     monkeypatch.setattr(functions, "empty_cuda_cache", lambda: None)
 
     config = replace(
         functions.ConfigTrainClassifier(),
-        policy_name="policy",
+        policy=functions.PolicySpec(model_name="policy", lora_config=None),
         start_dataset=0,
         end_dataset=4,
         generation_batch_size=2,
@@ -240,7 +339,10 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
 
     assert classifier.id is not None
     saved_dataset = functions.DatasetClassifier.load(
-        tmp_path / f"id={classifier.id}" / "dataset.json"
+        tmp_path
+        / "policy=policy"
+        / f"id={classifier.id}"
+        / "dataset.json"
     )
     assert saved_dataset.id == classifier.id
     assert saved_dataset.theta == calibration.theta
@@ -269,6 +371,7 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
     assert calibration.theta == pytest.approx(1.7)
     assert trainer_configs[0].lora_settings == config.lora_settings
     assert trainer_configs[0].output_dir.endswith(f"id={classifier.id}")
+    assert classifier.source_policy == "policy"
     assert classifier.model.training is False
 
     score_calls.clear()
@@ -298,7 +401,10 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
 
     with pytest.raises(ValueError, match="either policy"):
         functions.create_classifier(
-            replace(config, policy_load_path="checkpoint"),
+            replace(
+                config,
+                policy=replace(config.policy, checkpoint="checkpoint"),
+            ),
             policy=supplied_policy,
             calibration=calibration,
         )
