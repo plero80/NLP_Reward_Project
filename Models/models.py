@@ -46,3 +46,31 @@ class ScoreModel(Protocol):
     def score(self, prompts: Sequence[str], answers: Sequence[str]) -> list[float]:
         """Return a batch of scores from prompts and answers"""
         ...
+        
+        
+        
+from collections.abc import Sequence
+from typing import Any, Protocol
+
+import torch
+from transformers import PreTrainedModel, PreTrainedTokenizerBase
+
+
+class PPORewardModelProtocol(Protocol):
+    """Reward wrapper accepted by PolicyPPOTrainer."""
+
+    @property
+    def tokenizer(self) -> PreTrainedTokenizerBase:
+        ...
+
+    @property
+    def model(self) -> PreTrainedModel:
+        ...
+
+    @property
+    def classifiers(self) -> Sequence[dict[str, Any]]:
+        ...
+
+    def for_ppo(self) -> torch.nn.Module:
+        """Return the actual reward module that TRL will execute."""
+        ...

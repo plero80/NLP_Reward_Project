@@ -7,6 +7,7 @@ from transformers import PreTrainedModel
 
 from Models.model_policy import PolicyModel
 from Models.model_reward import RewardModel
+from Models.runtime import current_device
 from Models.model_value import ValueModel
 
 
@@ -113,9 +114,22 @@ class PolicyPPOTrainer:
             ) from exc
         return PPOConfig, PPOTrainer
 
+    def _place_models_for_training(self) -> None:
+        """Restore every PPO component after any earlier CPU offload."""
+        device = current_device()
+        self.policy.model.to(device)
+        self.reward.model.to(device)
+        self.value.model.to(device)
+        if self.reference_policy is not None:
+            self.reference_policy.model.to(device)
+        for entry in self.reward.classifiers:
+            entry["classifier"].model.to(device)
+
     def train(self) -> Any:
         PPOConfig, PPOTrainer = self._trl_classes()
         config = self.config
+
+        self._place_models_for_training()
 
         args = PPOConfig(
             output_dir=config.output_dir,

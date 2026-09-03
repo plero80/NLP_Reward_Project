@@ -127,3 +127,24 @@ def test_load_trainable_peft_policy_checkpoint(
 def test_load_policy_rejects_missing_checkpoint(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="Policy checkpoint not found"):
         PolicyModel.load(tmp_path / "missing")
+
+
+def test_move_to_current_device_restores_offloaded_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecordingModel:
+        def __init__(self) -> None:
+            self.devices: list[torch.device] = []
+
+        def to(self, device: torch.device) -> None:
+            self.devices.append(device)
+
+    expected_device = torch.device("cuda:3")
+    policy = PolicyModel.__new__(PolicyModel)
+    policy.model = RecordingModel()
+    monkeypatch.setattr(model_policy, "current_device", lambda: expected_device)
+
+    selected_device = policy.move_to_current_device()
+
+    assert selected_device == expected_device
+    assert policy.model.devices == [expected_device]

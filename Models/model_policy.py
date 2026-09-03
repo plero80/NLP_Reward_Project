@@ -89,13 +89,21 @@ class PolicyModel(GenerateModel):
     def save(self, path: str) -> None:
         self.model.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
+
+
+    def move_to_current_device(self) -> torch.device:
+        """Restore the policy to the device selected for active computation."""
+        device = current_device()
+        self.model.to(device)
+        return device
         
         
     def generate(self, prompt: str) -> str:
         logger.info("%s: Generating text", NAME)
 
+        device = self.move_to_current_device()
         generation_model: Any = self.model
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(device)
 
         output_ids = generation_model.generate(
             **inputs,
@@ -125,11 +133,12 @@ class PolicyModel(GenerateModel):
         if not prompts:
             return []
 
+        device = self.move_to_current_device()
         inputs = self.tokenizer(
             list(prompts),
             return_tensors="pt",
             padding=True,
-        ).to(self.model.device)
+        ).to(device)
 
         generation_model: Any = self.model
 
