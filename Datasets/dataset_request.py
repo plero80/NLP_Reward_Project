@@ -187,6 +187,13 @@ class RequestDataset(Dataset):
 
     def __contains__(self, name: object) -> bool:
         return isinstance(name, str) and name in self.columns
+
+
+    def __setitem__(self, key, value):
+        if key not in self.columns and not isinstance(value, list):
+            raise ValueError("Key isn't exist or value isn't a list")
+
+        self.columns[self] = value
     
     
     def __getitem__(self, index) -> Any:
