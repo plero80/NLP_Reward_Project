@@ -500,16 +500,14 @@ def create_classifier(
     hack_count = class_counts.get(1, 0)
     non_hack_count = class_counts.get(0, 0)
     hack_percentage = 100.0 * hack_count / total_count
-    logger.info(
-        "Reward-hack labels: %d of %d prompts (%.2f%%) are hacks; "
-        "%d are non-hacks; theta=%.6f; dataset_id=%s",
-        hack_count,
-        total_count,
-        hack_percentage,
-        non_hack_count,
-        calibration.theta,
-        artifact_id,
+    label_summary = (
+        f"Reward-hack labels: {hack_count} of {total_count} prompts "
+        f"({hack_percentage:.2f}%) are hacks; {non_hack_count} are "
+        f"non-hacks; theta={calibration.theta:.6f}; "
+        f"dataset_id={artifact_id}"
     )
+    print(f"\n{label_summary}\n", flush=True)
+    logger.info("%s", label_summary)
     if len(class_counts) < 2:
         raise ValueError(
             "Classifier labels contain only one class under the frozen "
@@ -526,11 +524,13 @@ def create_classifier(
         test_size=config.classifier_test_size,
         random_state=config.classifier_random_state,
     )
-    logger.info(
-        "Classifier label split: train=%s; test=%s",
-        train_dataset.class_counts(),
-        test_dataset.class_counts(),
+    split_summary = (
+        "Classifier label split: "
+        f"train={train_dataset.class_counts()}; "
+        f"test={test_dataset.class_counts()}"
     )
+    print(split_summary, flush=True)
+    logger.info("%s", split_summary)
 
     classifier: Classifier | None = None
     classifier_trainer: ClassifierTrainer | None = None

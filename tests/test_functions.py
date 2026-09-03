@@ -80,6 +80,7 @@ def test_warm_start_cannot_overwrite_its_source_directory(tmp_path) -> None:
 
 def test_create_classifier_runs_sequential_scorers_and_lora(
     caplog,
+    capsys,
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -223,6 +224,12 @@ def test_create_classifier_runs_sequential_scorers_and_lora(
         in caplog.text
     )
     assert "Classifier label split:" in caplog.text
+    notebook_output = capsys.readouterr().out
+    assert (
+        "Reward-hack labels: 2 of 4 prompts (50.00%) are hacks"
+        in notebook_output
+    )
+    assert "Classifier label split: train=" in notebook_output
     assert score_calls == [
         ("proxy", "reference", 2, 128),
         ("proxy", "target", 2, 128),

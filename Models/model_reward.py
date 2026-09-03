@@ -420,3 +420,114 @@ class RewardModel(ScoreModel):
         else:
             assert self.model_mode in policy.dataset.columns
         assert len(policy.get_dataset_col(self.model_mode)) > 0
+
+
+
+
+
+
+
+from collections.abc import Callable
+from types import SimpleNamespace
+
+import torch
+from transformers import PreTrainedTokenizerBase, PretrainedConfig
+
+
+class DeterministicBackbone(torch.nn.Module):
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        reward_function: Callable[[str], float],
+    ) -> None:
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.reward_function = reward_function
+        self.last_rewards: torch.Tensor | None = None
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        **kwargs,
+    ):
+        texts = self.tokenizer.batch_decode(
+            input_ids.detach().cpu().tolist(),
+            skip_special_tokens=True,
+        )
+
+        self.last_rewards = torch.tensor(
+            [self.reward_function(text) for text in texts],
+            dtype=torch.float32,
+            device=input_ids.device,
+        )
+
+        # TRL expects hidden states shaped [batch, sequence, hidden].
+        dummy_hidden_states = torch.zeros(
+            (*input_ids.shape, 1),
+            dtype=torch.float32,
+            device=input_ids.device,
+        )
+
+        return SimpleNamespace(
+            hidden_states=(dummy_hidden_states,),
+        )
+
+
+class DeterministicPPORewardModule(torch.nn.Module):
+    base_model_prefix = "backbone"
+
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        reward_function: Callable[[str], float],
+    ) -> None:
+        super().__init__()
+
+        self.config = PretrainedConfig(num_labels=1)
+        self.backbone = DeterministicBackbone(
+            tokenizer,
+            reward_function,
+        )
+
+    def score(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        rewards = self.backbone.last_rewards
+
+        if rewards is None:
+            raise RuntimeError("Backbone must run before score()")
+
+        # TRL expects [batch, sequence_length, 1].
+        return rewards[:, None, None].expand(
+            -1,
+            hidden_states.shape[1],
+            1,
+        )
+      
+        
+class DeterministicReward:
+    def __init__(self, tokenizer) -> None:
+        self.tokenizer = tokenizer
+        self.classifiers = []
+
+        self.model = DeterministicPPORewardModule(
+            tokenizer,
+            reward_function=self.calculate_reward,
+        )
+
+    @staticmethod
+    def calculate_reward(text: str) -> float:
+        reward = 0.0
+
+        if "correct answer" in text.lower():
+            reward += 1.0
+
+        if len(text) > 2_000:
+            reward -= 1.0
+
+        return reward
+
+    def for_ppo(self) -> torch.nn.Module:
+        self.model.eval()
+        return self.model
