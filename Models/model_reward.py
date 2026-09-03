@@ -5,6 +5,7 @@ from Models.model_policy import PolicyModel
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
+    AutoModelForCausalLM,
 )
 import math
 import torch
@@ -427,10 +428,8 @@ class RewardModel(ScoreModel):
 
 
 
-from collections.abc import Callable
 from types import SimpleNamespace
 
-import torch
 from transformers import PreTrainedTokenizerBase, PretrainedConfig
 
 
@@ -438,27 +437,76 @@ class DeterministicBackbone(torch.nn.Module):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase,
-        reward_function: Callable[[str], float],
+        embedding: torch.nn.Module,
     ) -> None:
         super().__init__()
         self.tokenizer = tokenizer
-        self.reward_function = reward_function
+        self.embedding = embedding
+        self.embedding.requires_grad_(False)
+        good_input_ids = tokenizer(
+            "good",
+            add_special_tokens=False,
+            return_tensors="pt",
+        )["input_ids"]
+        bad_input_ids = tokenizer(
+            "bad",
+            add_special_tokens=False,
+            return_tensors="pt",
+        )["input_ids"]
+        if good_input_ids.numel() == 0 or bad_input_ids.numel() == 0:
+            raise ValueError("Reward anchor words must produce at least one token")
+        self.register_buffer("good_input_ids", good_input_ids, persistent=False)
+        self.register_buffer("bad_input_ids", bad_input_ids, persistent=False)
         self.last_rewards: torch.Tensor | None = None
+
+    def _mean_embedding(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        token_embeddings = self.embedding(input_ids)
+        if attention_mask is None:
+            return token_embeddings.mean(dim=1)
+
+        mask = attention_mask.unsqueeze(-1).to(token_embeddings.dtype)
+        token_sum = (token_embeddings * mask).sum(dim=1)
+        token_count = mask.sum(dim=1).clamp_min(1.0)
+        return token_sum / token_count
+
+    def calculate_rewards(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        with torch.no_grad():
+            text_embeddings = self._mean_embedding(input_ids, attention_mask)
+            good_embedding = self._mean_embedding(self.good_input_ids)
+            bad_embedding = self._mean_embedding(self.bad_input_ids)
+            good_similarity = torch.nn.functional.cosine_similarity(
+                text_embeddings.float(),
+                good_embedding.float(),
+                dim=-1,
+            )
+            bad_similarity = torch.nn.functional.cosine_similarity(
+                text_embeddings.float(),
+                bad_embedding.float(),
+                dim=-1,
+            )
+            return torch.where(
+                good_similarity > bad_similarity,
+                torch.ones_like(good_similarity),
+                -torch.ones_like(bad_similarity),
+            )
 
     def forward(
         self,
         input_ids: torch.Tensor,
         **kwargs,
     ):
-        texts = self.tokenizer.batch_decode(
-            input_ids.detach().cpu().tolist(),
-            skip_special_tokens=True,
-        )
-
-        self.last_rewards = torch.tensor(
-            [self.reward_function(text) for text in texts],
-            dtype=torch.float32,
-            device=input_ids.device,
+        attention_mask = kwargs.get("attention_mask")
+        self.last_rewards = self.calculate_rewards(
+            input_ids,
+            attention_mask,
         )
 
         # TRL expects hidden states shaped [batch, sequence, hidden].
@@ -479,14 +527,14 @@ class DeterministicPPORewardModule(torch.nn.Module):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase,
-        reward_function: Callable[[str], float],
+        embedding: torch.nn.Module,
     ) -> None:
         super().__init__()
 
         self.config = PretrainedConfig(num_labels=1)
         self.backbone = DeterministicBackbone(
             tokenizer,
-            reward_function,
+            embedding,
         )
 
     def score(
@@ -507,26 +555,30 @@ class DeterministicPPORewardModule(torch.nn.Module):
       
         
 class DeterministicReward:
-    def __init__(self, tokenizer) -> None:
-        self.tokenizer = tokenizer
-        self.classifiers = []
+    def __init__(self, model_name: str) -> None:
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        language_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=best_dtype(),
+        )
+        embedding = language_model.get_input_embeddings()
+        self.classifiers: list[dict] = []
 
         self.model = DeterministicPPORewardModule(
-            tokenizer,
-            reward_function=self.calculate_reward,
+            self.tokenizer,
+            embedding,
         )
+        self.model.to(current_device())
 
-    @staticmethod
-    def calculate_reward(text: str) -> float:
-        reward = 0.0
-
-        if "correct answer" in text.lower():
-            reward += 1.0
-
-        if len(text) > 2_000:
-            reward -= 1.0
-
-        return reward
+    def calculate_reward(self, text: str) -> float:
+        inputs = self.tokenizer(text, return_tensors="pt")
+        device = next(self.model.parameters()).device
+        inputs = inputs.to(device)
+        rewards = self.model.backbone.calculate_rewards(
+            inputs["input_ids"],
+            inputs.get("attention_mask"),
+        )
+        return float(rewards[0].item())
 
     def for_ppo(self) -> torch.nn.Module:
         self.model.eval()
