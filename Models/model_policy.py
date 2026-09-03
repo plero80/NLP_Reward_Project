@@ -426,3 +426,17 @@ class PolicyModel(GenerateModel):
             model.eval()
 
         return loaded
+
+
+    def normalize_score_col(self, name, mean, std) -> None:
+        if std <= 0:
+            raise ValueError("std must be greater than zero")
+
+        scores = torch.as_tensor(
+            self.dataset[name],
+            dtype=torch.float32,
+            device="cpu",
+        )
+
+        normalized_scores = (scores - mean) / std
+        self.dataset[name] = normalized_scores.tolist()
