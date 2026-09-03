@@ -357,10 +357,27 @@ def _score_reference_and_target(
 
 
 def _build_gap_calibration(
-    proxy_scores: np.ndarray,
-    judge_scores: np.ndarray,
+    proxy_scores: list[float] | np.ndarray,
+    judge_scores: list[float] | np.ndarray,
     quantile: float,
 ) -> GapCalibration:
+    proxy_scores = np.asarray(proxy_scores, dtype=np.float64)
+    judge_scores = np.asarray(judge_scores, dtype=np.float64)
+
+    if proxy_scores.ndim != 1 or judge_scores.ndim != 1:
+        raise ValueError("Proxy and judge scores must be one-dimensional")
+    if proxy_scores.size == 0 or judge_scores.size == 0:
+        raise ValueError("Proxy and judge scores cannot be empty")
+    if proxy_scores.shape != judge_scores.shape:
+        raise ValueError(
+            "Proxy and judge score shapes differ: "
+            f"{proxy_scores.shape} != {judge_scores.shape}"
+        )
+    if not np.isfinite(proxy_scores).all():
+        raise ValueError("Proxy scores must all be finite")
+    if not np.isfinite(judge_scores).all():
+        raise ValueError("Judge scores must all be finite")
+
     proxy_mean = float(proxy_scores.mean())
     proxy_std = float(proxy_scores.std(ddof=0))
     judge_mean = float(judge_scores.mean())
