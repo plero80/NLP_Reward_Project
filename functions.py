@@ -728,6 +728,10 @@ def reward_similarity(dataset, policy: PolicyModel, proxy: RewardModel, judge: R
     proxy.score_policy(policy, 64)
     judge.score_policy(policy, 16)
 
+    gap = _build_gap_calibration(policy.get_dataset_col("proxy"), policy.get_dataset_col("judge"), 0.95)
+    policy.normalize_score_col("proxy", gap.proxy_mean, gap.proxy_std)
+    policy.normalize_score_col("judge", gap.judge_mean, gap.judge_std)
+
     r_small = policy.get_dataset_col("proxy")
     r_large = policy.get_dataset_col("judge")
 
