@@ -25,6 +25,7 @@ from Trainers.trainer_classifier import (
 )
 from Trainers.trainer_ppo import PPOTrainingConfig, PolicyPPOTrainer
 import numpy as np
+from scipy.stats import pearsonr, spearmanr
 
 logger = logging.getLogger(__name__)
 
@@ -717,3 +718,24 @@ def eval_policy_with_reward(
         reward_model = None
         trainer = None
         empty_cuda_cache()
+
+
+
+def reward_similarity(dataset, policy: PolicyModel, proxy: RewardModel, judge: RewardModel):
+
+
+    policy.generate_new_dataset(dataset, 64)
+    proxy.score_policy(policy, 64)
+    judge.score_policy(policy, 16)
+
+    r_small = policy.get_dataset_col("proxy")
+    r_large = policy.get_dataset_col("judge")
+
+    print("Pearson :", pearsonr(r_small, r_large))
+    print("Spearman:", spearmanr(r_small, r_large))
+
+    r_small = np.asarray(r_small)
+    r_large = np.asarray(r_large)
+
+    print("small mean/std:", r_small.mean(), r_small.std())
+    print("large mean/std:", r_large.mean(), r_large.std())
