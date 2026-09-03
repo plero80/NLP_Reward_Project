@@ -119,9 +119,9 @@ class ConfigTrainClassifier:
     judge_model_name: str = "Skywork/Skywork-Reward-V2-Qwen3-4B"
     judge_mode_name: str = "judge"
 
-    generation_batch_size: int = 8
-    reward_batch_size: int = 1
-    judge_batch_size: int = 1
+    generation_batch_size: int = 64
+    reward_batch_size: int = 64
+    judge_batch_size: int = 32
     score_max_length: int = 2_048
 
     classifier_model_name: str = "Qwen/Qwen3-0.6B"
@@ -130,7 +130,7 @@ class ConfigTrainClassifier:
     classifier_random_state: int = 42
     classifier_output_root: str | Path = "outputs/classifiers"
     classifier_epochs: float = 3.0
-    classifier_batch_size: int = 8
+    classifier_batch_size: int = 64
     classifier_learning_rate: float = 2e-5
     classifier_max_length: int = 512
     lora_settings: LoRASettings | None = field(default_factory=LoRASettings)
