@@ -597,12 +597,8 @@ def _ppo_output_directory(
 def eval_policy_with_reward(
     config: ConfigEval,
 ) -> tuple[PolicyModel, float]:
-    """Train PPO, generate answers, and evaluate the resulting policy.
-
-    ``config.policy_checkpoint`` performs a policy-weight warm start. It is
-    not an exact PPO resume because optimizer, value-model, RNG, and dataloader
-    state are not restored.
-    """
+    """Train a policy with PPO, generate answers, and return it on CPU."""
+    
     if config.start_dataset < 0 or config.end_dataset <= config.start_dataset:
         raise ValueError("end must be greater than a non-negative start")
     if config.epochs <= 0:
@@ -736,6 +732,145 @@ def eval_policy_with_reward(
         trainer = None
         empty_cuda_cache()
 
+
+
+def ppo_train_policy(config) -> PolicyModel:
+    
+    """Train PPO, generate answers, and evaluate the resulting policy.
+
+    ``config.policy_checkpoint`` performs a policy-weight warm start. It is
+    not an exact PPO resume because optimizer, value-model, RNG, and dataloader
+    state are not restored.
+    """
+    if config.start_dataset < 0 or config.end_dataset <= config.start_dataset:
+        raise ValueError("end must be greater than a non-negative start")
+    if config.epochs <= 0:
+        raise ValueError("epochs must be positive")
+    for name, value in (
+        ("batch_size", config.batch_size),
+        (
+            "gradient_accumulation_steps",
+            config.gradient_accumulation_steps,
+        ),
+        (
+            "rollout_forward_batch_size",
+            config.rollout_forward_batch_size,
+        ),
+        ("policy_batch_size", config.policy_batch_size),
+        ("response_length", config.response_length),
+        ("save_steps", config.save_steps),
+    ):
+        if value < 1:
+            raise ValueError(f"{name} must be at least 1")
+
+    training_output_dir = _ppo_output_directory(config)
+
+    policy: PolicyModel | None = None
+    reference_policy: PolicyModel | None = None
+    value_model: ValueModel | None = None
+    reward_model: RewardModel | None = None
+    trainer: PolicyPPOTrainer | None = None
+    evaluator: Any | None = None
+
+    try:
+        policy = (
+            PolicyModel.load(
+                config.policy_checkpoint,
+                is_trainable=True,
+            )
+            if config.policy_checkpoint is not None
+            else PolicyModel(config.policy_name)
+        )
+
+        raw_dataset = load_dataset(config.dataset_name)
+        dataset = RequestDataset.from_raw(raw_dataset, policy.model_name)
+        dataset.truncate(config.start_dataset, config.end_dataset)
+        if len(dataset) == 0:
+            raise ValueError("The selected PPO dataset range is empty")
+
+        # Full-model warm starts need the original policy for KL reference.
+        # For PEFT, TRL can use the base model with the adapter disabled.
+        reference_policy = (
+            PolicyModel(config.policy_name)
+            if config.policy_checkpoint is not None
+            and not isinstance(policy.model, PeftModel)
+            else None
+        )
+        value_model = ValueModel(config.policy_name)
+        reward_model = RewardModel(
+            config.reward_model_name,
+            config.reward_mode_name,
+        )
+
+        ppo_config = PPOTrainingConfig(
+            output_dir=training_output_dir,
+            epochs=config.epochs,
+            batch_size=config.batch_size,
+            gradient_accumulation_steps=(
+                config.gradient_accumulation_steps
+            ),
+            rollout_forward_batch_size=(
+                config.rollout_forward_batch_size
+            ),
+            response_length=config.response_length,
+            num_ppo_epochs=4,
+            num_mini_batches=1,
+            learning_rate=3e-6,
+            save_steps=config.save_steps,
+            save_total_limit=1,
+        )
+        trainer = PolicyPPOTrainer(
+            policy,
+            reward_model,
+            value_model,
+            dataset,
+            ppo_config,
+            reference_policy=reference_policy,
+        )
+
+        try:
+            trainer.train()
+        except BaseException:
+            for owner in (
+                policy,
+                reference_policy,
+                value_model,
+                reward_model,
+            ):
+                offload_to_cpu(owner)
+            raise
+        finally:
+            trainer = None
+            reference_policy = None
+            value_model = None
+            reward_model = None
+            empty_cuda_cache()
+
+        try:
+            policy.generate_new_dataset(
+                dataset,
+                batch_size=config.policy_batch_size,
+            )
+        except BaseException:
+            offload_to_cpu(policy)
+            raise
+
+        # Prometheus is large, so it must not overlap the policy on CUDA.
+        policy.offload()
+        empty_cuda_cache()
+      
+        return policy
+
+    except BaseException:
+            offload_to_cpu(policy)
+            raise
+    finally:
+        policy = None
+        reference_policy = None
+        value_model = None
+        reward_model = None
+        trainer = None
+        empty_cuda_cache()
 
 
 def get_gap_calibration(
