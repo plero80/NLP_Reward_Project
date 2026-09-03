@@ -580,9 +580,33 @@ class DeterministicReward:
         )
         return float(rewards[0].item())
 
+    def add_classifier(
+        self,
+        name: str,
+        classifier: BinaryClassifier,
+        tokenizer=None,
+    ) -> None:
+        classifier_model = getattr(classifier, "model", None)
+        if classifier_model is not None:
+            classifier_model.eval()
+        self.classifiers.append(
+            {
+                "name": name,
+                "classifier": classifier,
+                "tokenizer": tokenizer,
+            }
+        )
+
     def for_ppo(self) -> torch.nn.Module:
-        self.model.eval()
-        return self.model
+        if not self.classifiers:
+            self.model.eval()
+            return self.model
+        classifier_models = [
+            entry["classifier"].model for entry in self.classifiers
+        ]
+        composite_model = CompositeRewardModel(self.model, classifier_models)
+        composite_model.eval()
+        return composite_model
 
 
 

@@ -71,6 +71,10 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
         {"model": torch.nn.Linear(1, 1)},
     )()
     calls: dict[str, tuple | str] = {}
+    loaded_classifiers = {
+        "first": object(),
+        "second": object(),
+    }
 
     monkeypatch.setattr(
         functions,
@@ -96,8 +100,13 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
         )
         return policy
 
-    def create_reward(class_name, model_name, mode_name):
-        calls["reward"] = (class_name, model_name, mode_name)
+    def create_reward(class_name, model_name, mode_name, classifiers):
+        calls["reward"] = (
+            class_name,
+            model_name,
+            mode_name,
+            tuple(classifiers),
+        )
         return reward
 
     monkeypatch.setattr(
@@ -118,6 +127,11 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
     monkeypatch.setattr(functions, "ValueModel", lambda _name: value)
     monkeypatch.setattr(functions, "PolicyPPOTrainer", _FakeTrainer)
     monkeypatch.setattr(functions, "empty_cuda_cache", lambda: None)
+    monkeypatch.setattr(
+        functions.Classifier,
+        "load",
+        lambda path: loaded_classifiers[str(path)],
+    )
 
     config = functions.TrainingPPOConfig(
         policy=functions.PolicySpec(
@@ -137,6 +151,7 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
             end=7,
         ),
         output_dir=tmp_path / "ppo",
+        classifier_load=("first", "second"),
         generation_batch_size=12,
     )
 
@@ -161,6 +176,10 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
         "DeterministicReward",
         "policy/model",
         "proxy",
+        (
+            loaded_classifiers["first"],
+            loaded_classifiers["second"],
+        ),
     )
     assert policy.generated == (dataset, 12)
     assert policy.dataset_save_path == tmp_path / "ppo" / "final"

@@ -7,8 +7,10 @@ from transformers import (
 )
 import torch
 from peft import PeftMixedModel, PeftModel
+from peft import PeftConfig
 
 from pathlib import Path
+import json
 
 from collections.abc import Sequence
 import logging
@@ -20,6 +22,8 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 class Classifier(BinaryClassifier):
+
+    METADATA_FILE_NAME = "classifier_metadata.json"
     
     def __init__(
         self,
@@ -37,6 +41,112 @@ class Classifier(BinaryClassifier):
         )
         self.model.to(current_device())
         self.id = classifier_id or str(uuid4())
+
+    def save(self, path: str | Path) -> Path:
+        """Save a loadable classifier, tokenizer, and stable classifier ID."""
+        destination = Path(path).expanduser()
+        destination.mkdir(parents=True, exist_ok=True)
+        self.model.save_pretrained(str(destination))
+        self.tokenizer.save_pretrained(destination)
+        metadata_path = destination / self.METADATA_FILE_NAME
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "format_version": 1,
+                    "classifier_id": self.id,
+                    "model_name": self.model_name,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return destination
+
+    @classmethod
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        device: torch.device | str | None = None,
+    ) -> "Classifier":
+        """Restore a full-model or PEFT classifier checkpoint."""
+        checkpoint = Path(path).expanduser()
+        if not checkpoint.exists():
+            raise FileNotFoundError(
+                f"Classifier checkpoint not found: {checkpoint}"
+            )
+        if not checkpoint.is_dir():
+            raise NotADirectoryError(
+                f"Classifier checkpoint must be a directory: {checkpoint}"
+            )
+
+        checkpoint_source = str(checkpoint)
+        adapter_checkpoint = (checkpoint / "adapter_config.json").is_file()
+        if adapter_checkpoint:
+            peft_config = PeftConfig.from_pretrained(checkpoint_source)
+            base_model_name = peft_config.base_model_name_or_path
+            if not base_model_name:
+                raise ValueError(
+                    "Classifier PEFT checkpoint does not identify its base "
+                    f"model: {checkpoint}"
+                )
+            tokenizer_source = (
+                checkpoint_source
+                if (checkpoint / "tokenizer_config.json").is_file()
+                else base_model_name
+            )
+            base_model = AutoModelForSequenceClassification.from_pretrained(
+                base_model_name,
+                dtype=best_dtype(),
+            )
+            model = PeftModel.from_pretrained(
+                base_model,
+                checkpoint_source,
+                is_trainable=False,
+            )
+            model_name = base_model_name
+        else:
+            tokenizer_source = checkpoint_source
+            model = AutoModelForSequenceClassification.from_pretrained(
+                checkpoint_source,
+                dtype=best_dtype(),
+            )
+            model_name = checkpoint_source
+
+        classifier_id = checkpoint.name
+        metadata_path = checkpoint / cls.METADATA_FILE_NAME
+        if metadata_path.is_file():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"Classifier metadata is not valid JSON: {metadata_path}"
+                ) from error
+            if not isinstance(metadata, dict) or metadata.get(
+                "format_version"
+            ) != 1:
+                raise ValueError(
+                    f"Unsupported classifier metadata: {metadata_path}"
+                )
+            stored_id = metadata.get("classifier_id")
+            if not isinstance(stored_id, str) or not stored_id.strip():
+                raise ValueError("Classifier metadata has an invalid ID")
+            classifier_id = stored_id
+            stored_model_name = metadata.get("model_name")
+            if isinstance(stored_model_name, str) and stored_model_name:
+                model_name = stored_model_name
+
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
+        loaded = cls.__new__(cls)
+        loaded.model_name = model_name
+        loaded.tokenizer = tokenizer
+        loaded.model = model
+        loaded.model.to(device if device is not None else current_device())
+        loaded.model.eval()
+        loaded.id = classifier_id
+        return loaded
         
         
     def predict(

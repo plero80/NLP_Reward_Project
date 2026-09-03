@@ -23,6 +23,32 @@ def test_eval_policy_with_reward_accepts_only_config() -> None:
         functions.eval_policy_with_reward(invalid_config)
 
 
+def test_offload_to_cpu_also_offloads_attached_classifiers() -> None:
+    reward_model = torch.nn.Linear(1, 1)
+    classifier_model = torch.nn.Linear(1, 1)
+    reward = type(
+        "RewardWithClassifier",
+        (),
+        {
+            "model": reward_model,
+            "classifiers": [
+                {
+                    "classifier": type(
+                        "ClassifierOwner",
+                        (),
+                        {"model": classifier_model},
+                    )(),
+                }
+            ],
+        },
+    )()
+
+    functions.offload_to_cpu(reward)
+
+    assert reward_model.weight.device.type == "cpu"
+    assert classifier_model.weight.device.type == "cpu"
+
+
 def test_classifier_config_rejects_an_empty_range() -> None:
     config = replace(
         functions.ConfigTrainClassifier(),

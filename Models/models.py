@@ -72,3 +72,12 @@ class PPORewardModelProtocol(Protocol):
     def for_ppo(self) -> torch.nn.Module:
         """Return the actual reward module that TRL will execute."""
         ...
+
+    def add_classifier(
+        self,
+        name: str,
+        classifier: BinaryClassifier,
+        tokenizer: PreTrainedTokenizerBase,
+    ) -> None:
+        """Attach a classifier adjustment to PPO rewards."""
+        ...

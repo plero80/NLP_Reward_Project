@@ -182,8 +182,7 @@ class ClassifierTrainer:
         trainer.train()
 
         final_directory = Path(self.config.output_dir) / "final"
-        trainer.save_model(str(final_directory))
-        self.classifier.tokenizer.save_pretrained(final_directory)
+        self.classifier.save(final_directory)
 
         return trainer
 

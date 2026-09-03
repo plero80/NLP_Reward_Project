@@ -6,6 +6,7 @@ import Datasets.dataset_request as dataset_request
 from Datasets.dataset_classifier import DatasetClassifier
 from Datasets.dataset_request import RequestDataset
 from Factory.factory import DatasetFactory
+from Factory.factory import RewardModelFactory
 
 
 def test_dataset_factory_creates_request_dataset(monkeypatch) -> None:
@@ -76,3 +77,27 @@ def test_request_dataset_from_raw_uses_optional_range(monkeypatch) -> None:
     )
 
     assert dataset["prompts"] == ["Human: Second?", "Human: Third?"]
+
+
+def test_reward_factory_attaches_loaded_classifiers(monkeypatch) -> None:
+    attached: list[tuple] = []
+    reward = SimpleNamespace(
+        add_classifier=lambda *args: attached.append(args),
+    )
+    builders = dict(RewardModelFactory._builders)
+    builders["RewardModel"] = lambda _model, _mode: reward
+    monkeypatch.setattr(RewardModelFactory, "_builders", builders)
+    classifier = SimpleNamespace(
+        id="classifier-id",
+        tokenizer="tokenizer",
+    )
+
+    created = RewardModelFactory.create_model(
+        "RewardModel",
+        "reward/model",
+        "proxy",
+        [classifier],
+    )
+
+    assert created is reward
+    assert attached == [("classifier-id", classifier, "tokenizer")]

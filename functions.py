@@ -43,22 +43,25 @@ def empty_cuda_cache() -> None:
 
 
 def offload_to_cpu(owner: object | None) -> None:
-    """Move a model, or an object's ``model`` attribute, to CPU."""
+    """Move an owner model and any attached classifier models to CPU."""
     if owner is None:
         return
 
     offload = getattr(owner, "offload", None)
     if callable(offload):
         offload()
-        return
+    else:
+        module = (
+            owner
+            if isinstance(owner, torch.nn.Module)
+            else getattr(owner, "model", None)
+        )
+        if isinstance(module, torch.nn.Module):
+            module.to("cpu")
 
-    module = (
-        owner
-        if isinstance(owner, torch.nn.Module)
-        else getattr(owner, "model", None)
-    )
-    if isinstance(module, torch.nn.Module):
-        module.to("cpu")
+    for entry in getattr(owner, "classifiers", ()):
+        classifier = entry.get("classifier") if isinstance(entry, dict) else entry
+        offload_to_cpu(classifier)
 
 
 def delete_model(model: object) -> None:
@@ -783,6 +786,7 @@ class DatasetSpec:
 class EvaluatorSpec:
     class_name: str = "PrometheusEvaluator"
     model_name: str = "prometheus-eval/prometheus-7b-v2.0"
+    
 
 
 @dataclass(frozen=True)
@@ -790,6 +794,7 @@ class TrainingPPOConfig:
     policy: PolicySpec = field(default_factory=PolicySpec)
     reward: RewardSpec = field(default_factory=RewardSpec)
     dataset: DatasetSpec = field(default_factory=DatasetSpec)
+    classifier_load: tuple[str | Path, ...] = ()
     output_dir: str | Path | None = None
     epochs: float = 1.0
     batch_size: int = 8
@@ -853,11 +858,20 @@ def temp_ppo_train_policy(config: TrainingPPOConfig) -> PolicyModel:
         checkpoint=config.policy.checkpoint,
         is_trainable=True,
     )
+    
+    
+    classifiers = []
+    for classifier_path in config.classifier_load:
+        classifiers.append(Classifier.load(classifier_path))
+    
+    
     reward = RewardModelFactory.create_model(
         config.reward.class_name,
         config.reward.model_name,
         config.reward.mode_name,
+        classifiers,
     )
+    
     return _train_policy(
         policy,
         reward,

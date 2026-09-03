@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Literal, overload
 
@@ -7,6 +7,7 @@ from torch.utils.data import Dataset
 from Datasets.dataset_classifier import DatasetClassifier
 from Datasets.dataset_request import RequestDataset
 from Models.lora import LoRASettings
+from Models.model_classifier import Classifier
 from Models.model_evaluator import EvaluatorOpenAIModel, PrometheusEvaluator
 from Models.model_policy import PolicyModel
 from Models.model_reward import DeterministicReward, RewardModel
@@ -30,6 +31,7 @@ class RewardModelFactory:
         class_name: str,
         model_name: str,
         mode_name: str,
+        classifiers: Sequence[Classifier] = (),
     ) -> PPORewardModelProtocol:
         try:
             builder = cls._builders[class_name]
@@ -40,7 +42,14 @@ class RewardModelFactory:
                 f"Available classes: {available}"
             ) from None
 
-        return builder(model_name, mode_name)
+        reward = builder(model_name, mode_name)
+        for classifier in classifiers:
+            reward.add_classifier(
+                classifier.id,
+                classifier,
+                classifier.tokenizer,
+            )
+        return reward
 
 
 class PolicyModelFactory:
