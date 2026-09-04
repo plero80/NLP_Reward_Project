@@ -10,6 +10,7 @@ from Datasets.dataset_gap_finder import DatasetGapFinder
 from Models.model_reward import CompositeRewardModel
 from Models.reward_adjustment import GapFinderCorrection
 from Trainers.trainer_gap_finder import compute_gap_metrics
+from Trainers.trainer_gap_finder import _Float32RegressionTrainer
 
 
 def test_gap_dataset_uses_continuous_normalized_difference(tmp_path: Path) -> None:
@@ -30,6 +31,30 @@ def test_gap_metrics_are_regression_metrics() -> None:
         )
     )
     assert metrics == pytest.approx({"mae": 0.5, "mse": 0.5, "rmse": 0.5 ** 0.5})
+
+
+def test_regression_loss_supports_bfloat16_logits_and_float32_labels() -> None:
+    class Model(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.value = torch.nn.Parameter(torch.tensor(1.0, dtype=torch.bfloat16))
+
+        def forward(self, input_ids):
+            return SimpleNamespace(logits=self.value.expand(input_ids.shape[0], 1))
+
+    model = Model()
+    trainer = object.__new__(_Float32RegressionTrainer)
+    loss = trainer.compute_loss(
+        model,
+        {
+            "input_ids": torch.ones((2, 1), dtype=torch.long),
+            "labels": torch.tensor([0.0, 2.0], dtype=torch.float32),
+        },
+    )
+
+    assert loss.dtype == torch.float32
+    loss.backward()
+    assert model.value.grad is not None
 
 
 class _GapModel(torch.nn.Module):

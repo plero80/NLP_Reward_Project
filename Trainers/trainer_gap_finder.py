@@ -5,6 +5,7 @@ from typing import Any
 from datasets import Dataset as HFDataset
 import numpy as np
 from peft import PeftModel, TaskType, get_peft_model
+import torch.nn.functional as F
 from transformers import DataCollatorWithPadding, EvalPrediction, Trainer, TrainingArguments
 
 from Datasets.dataset_gap_finder import DatasetGapFinder
@@ -31,6 +32,24 @@ class GapFinderTrainingConfig:
     learning_rate: float = 2e-5
     max_length: int = 512
     lora_settings: LoRASettings | None = None
+
+
+class _Float32RegressionTrainer(Trainer):
+    """Compute MSE in float32 while the model runs in BF16 or FP16."""
+
+    def compute_loss(
+        self,
+        model,
+        inputs,
+        return_outputs=False,
+        num_items_in_batch=None,
+    ):
+        model_inputs = dict(inputs)
+        labels = model_inputs.pop("labels")
+        outputs = model(**model_inputs)
+        predictions = outputs.logits.reshape(-1).float()
+        loss = F.mse_loss(predictions, labels.reshape(-1).float())
+        return (loss, outputs) if return_outputs else loss
 
 
 class GapFinderTrainer:
@@ -87,7 +106,7 @@ class GapFinderTrainer:
             greater_is_better=False if has_evaluation else None,
             report_to="none",
         )
-        trainer = Trainer(
+        trainer = _Float32RegressionTrainer(
             model=self.gap_finder.model,
             args=arguments,
             train_dataset=train,

@@ -149,7 +149,7 @@ class ConfigTrainClassifier:
     gap_finder_model_name: str = "Qwen/Qwen3-0.6B"
     gap_finder_output_root: str | Path = "outputs/gap_finders"
     gap_finder_epochs: float = 3.0
-    gap_finder_batch_size: int = 8
+    gap_finder_batch_size: int = 32
     gap_finder_learning_rate: float = 2e-5
     gap_finder_max_length: int = 512
     gap_finder_lora_settings: LoRASettings | None = field(default_factory=LoRASettings)
