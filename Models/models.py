@@ -15,8 +15,17 @@ class GenerateModel(Protocol):
     def generate_batch(self, prompts: Sequence[str]) -> Sequence[str]:
         """Return a batch of answers in text"""
         ...
-        
-        
+
+
+class ResidualClassifier(Protocol):
+    def predict_gap(
+        self,
+        prompts: Sequence[str],
+        answers: Sequence[str],
+    ) -> list[float]:
+        """Return normalized ``proxy_z - judge_z`` predictions."""
+        ...
+
 
 class BinaryClassifier(Protocol):
     def predict(
@@ -80,4 +89,8 @@ class PPORewardModelProtocol(Protocol):
         tokenizer: PreTrainedTokenizerBase,
     ) -> None:
         """Attach a classifier adjustment to PPO rewards."""
+        ...
+
+    def add_adjustment(self, adjustment: Any) -> None:
+        """Attach a generic callable reward adjustment."""
         ...

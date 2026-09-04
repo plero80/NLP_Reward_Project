@@ -16,9 +16,12 @@ import torch
 from transformers.trainer_utils import get_last_checkpoint
 
 from Datasets.dataset_classifier import DatasetClassifier
+from Datasets.dataset_gap_finder import DatasetGapFinder
 from Datasets.dataset_request import RequestDataset
 from Models.lora import LoRASettings
 from Models.model_classifier import Classifier
+from Models.model_gap_finder import GapFinder
+from Models.reward_adjustment import RewardAdjustment
 from Models.models import PPORewardModelProtocol
 from Factory import *
 import Models.model_evaluator as model_evaluator
@@ -30,6 +33,7 @@ from Trainers.trainer_classifier import (
     ClassifierTrainer,
     ClassifierTrainingConfig,
 )
+from Trainers.trainer_gap_finder import GapFinderTrainer, GapFinderTrainingConfig
 from Trainers.trainer_ppo import PPOTrainingConfig, PolicyPPOTrainer
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
@@ -64,6 +68,8 @@ def offload_to_cpu(owner: object | None) -> None:
     for entry in getattr(owner, "classifiers", ()):
         classifier = entry.get("classifier") if isinstance(entry, dict) else entry
         offload_to_cpu(classifier)
+    for adjustment in getattr(owner, "adjustments", ()):
+        offload_to_cpu(adjustment)
 
 
 def delete_model(model: object) -> None:
@@ -140,6 +146,14 @@ class ConfigTrainClassifier:
     classifier_max_length: int = 512
     lora_settings: LoRASettings | None = field(default_factory=LoRASettings)
 
+    gap_finder_model_name: str = "Qwen/Qwen3-0.6B"
+    gap_finder_output_root: str | Path = "outputs/gap_finders"
+    gap_finder_epochs: float = 3.0
+    gap_finder_batch_size: int = 8
+    gap_finder_learning_rate: float = 2e-5
+    gap_finder_max_length: int = 512
+    gap_finder_lora_settings: LoRASettings | None = field(default_factory=LoRASettings)
+
 
 def _validate_classifier_config(config: ConfigTrainClassifier) -> None:
     if config.start_dataset < 0:
@@ -168,6 +182,8 @@ def _validate_classifier_config(config: ConfigTrainClassifier) -> None:
         "score_max_length": config.score_max_length,
         "classifier_batch_size": config.classifier_batch_size,
         "classifier_max_length": config.classifier_max_length,
+        "gap_finder_batch_size": config.gap_finder_batch_size,
+        "gap_finder_max_length": config.gap_finder_max_length,
     }
     for name, value in positive_sizes.items():
         if value < 1:
@@ -175,6 +191,10 @@ def _validate_classifier_config(config: ConfigTrainClassifier) -> None:
 
     if config.classifier_epochs <= 0:
         raise ValueError("classifier_epochs must be positive")
+    if config.gap_finder_epochs <= 0:
+        raise ValueError("gap_finder_epochs must be positive")
+    if config.gap_finder_learning_rate <= 0:
+        raise ValueError("gap_finder_learning_rate must be positive")
     if not 0.0 < config.calibration_quantile < 1.0:
         raise ValueError("calibration_quantile must be between 0 and 1")
     if not 0.0 < config.classifier_test_size < 1.0:
@@ -674,6 +694,126 @@ def create_classifier(
         empty_cuda_cache()
 
 
+def create_gap_finder(
+    config: ConfigTrainClassifier | None = None,
+    *,
+    policy: PolicyModel | None = None,
+    calibration: GapCalibration | None = None,
+) -> tuple[GapFinder, GapCalibration]:
+    """Train a regressor for the continuous normalized proxy-minus-judge gap."""
+    config = config or ConfigTrainClassifier()
+    _validate_classifier_config(config)
+    if policy is not None and config.policy.checkpoint is not None:
+        raise ValueError("Pass either policy or config.policy.checkpoint, not both")
+
+    raw_dataset = load_dataset(config.dataset_name)
+    request_dataset = RequestDataset.from_raw(
+        raw_dataset,
+        config.policy.model_name,
+    )
+    request_dataset.truncate(config.start_dataset, config.end_dataset)
+    if len(request_dataset) == 0:
+        raise ValueError("The selected GapFinder dataset range is empty")
+
+    reference_rows = (
+        _generate_policy_rows(config, request_dataset, reference=True)
+        if calibration is None
+        else None
+    )
+    target_rows = _generate_policy_rows(
+        config,
+        request_dataset,
+        reference=False,
+        supplied_policy=policy,
+    )
+    reference_proxy, target_proxy = _score_reference_and_target(
+        spec=config.reward,
+        batch_size=config.reward_batch_size,
+        max_length=config.score_max_length,
+        reference_rows=reference_rows,
+        target_rows=target_rows,
+    )
+    reference_judge, target_judge = _score_reference_and_target(
+        spec=config.judge,
+        batch_size=config.judge_batch_size,
+        max_length=config.score_max_length,
+        reference_rows=reference_rows,
+        target_rows=target_rows,
+    )
+    if calibration is None:
+        if reference_proxy is None or reference_judge is None:
+            raise RuntimeError("Reference scores are required for calibration")
+        calibration = _build_gap_calibration(
+            reference_proxy,
+            reference_judge,
+            config.calibration_quantile,
+        )
+    else:
+        _validate_gap_calibration(calibration)
+
+    target_proxy_z = (target_proxy - calibration.proxy_mean) / calibration.proxy_std
+    target_judge_z = (target_judge - calibration.judge_mean) / calibration.judge_std
+    artifact_id = str(uuid4())
+    dataset = DatasetGapFinder(id=artifact_id)
+    dataset.add(
+        target_rows[0],
+        target_rows[1],
+        target_proxy_z.tolist(),
+        target_judge_z.tolist(),
+    )
+
+    policy_source = _policy_source_label(config, policy)
+    run_directory = (
+        Path(config.gap_finder_output_root)
+        / f"policy={policy_source}"
+        / f"id={artifact_id}"
+    )
+    dataset.save(run_directory / "dataset.json")
+    calibration.save(run_directory / "calibration.json")
+    train_dataset, test_dataset = dataset.split(
+        test_size=config.classifier_test_size,
+        random_state=config.classifier_random_state,
+    )
+    gaps = np.asarray([row["labels"] for row in dataset.dataset])
+    print(
+        "GapFinder targets: "
+        f"count={len(gaps)}, mean={gaps.mean():.6f}, "
+        f"std={gaps.std():.6f}, theta={calibration.theta:.6f}",
+        flush=True,
+    )
+
+    gap_finder: GapFinder | None = None
+    trainer: GapFinderTrainer | None = None
+    hf_trainer = None
+    try:
+        gap_finder = GapFinder(
+            config.gap_finder_model_name,
+            gap_finder_id=artifact_id,
+            source_policy=policy_source,
+        )
+        training_config = GapFinderTrainingConfig(
+            output_dir=str(run_directory),
+            epochs=config.gap_finder_epochs,
+            batch_size=config.gap_finder_batch_size,
+            learning_rate=config.gap_finder_learning_rate,
+            max_length=config.gap_finder_max_length,
+            lora_settings=config.gap_finder_lora_settings,
+        )
+        trainer = GapFinderTrainer(gap_finder, training_config)
+        hf_trainer = trainer.train(train_dataset)
+        metrics = trainer.evaluate(hf_trainer, test_dataset)
+        logger.info("GapFinder test metrics: %s", metrics)
+        gap_finder.model.eval()
+        return gap_finder, calibration
+    except BaseException:
+        offload_to_cpu(gap_finder)
+        raise
+    finally:
+        hf_trainer = None
+        trainer = None
+        empty_cuda_cache()
+
+
 def _ppo_output_directory(
     config: ConfigEval  | TrainingPPOConfig,
 ) -> str:
@@ -947,6 +1087,7 @@ def temp_ppo_train_policy(
     config: TrainingPPOConfig,
     *,
     classifiers: Sequence[Classifier] = (),
+    adjustments: Sequence[RewardAdjustment] = (),
 ) -> PolicyModel:
     """Build configured components, train with PPO, and return policy on CPU."""
     _validate_training_ppo_config(config)
@@ -979,13 +1120,18 @@ def temp_ppo_train_policy(
         reward_classifiers.append(Classifier.load(classifier_path))
     
     
+    reward_options = {
+        "mean": config.reward.mean,
+        "std": config.reward.std,
+    }
+    if adjustments:
+        reward_options["adjustments"] = adjustments
     reward = RewardModelFactory.create_model(
         config.reward.class_name,
         config.reward.model_name,
         config.reward.mode_name,
         reward_classifiers,
-        mean=config.reward.mean,
-        std=config.reward.std,
+        **reward_options,
     )
     
     return _train_policy(
@@ -1315,20 +1461,29 @@ def evaluate_policy(config: EvaluateConfig) -> float:
     if policy.dataset is None:
         raise ValueError("The loaded policy checkpoint contains no dataset")
 
-    evaluator = EvaluatorModelFactory.create_model(
-        config.evaluator.class_name,
-        config.evaluator.model_name,
-    )
-
-    if not isinstance(evaluator, PrometheusEvaluator):
-        raise TypeError(
-            "This evaluation function currently requires PrometheusEvaluator"
+    # Saved answers are already present, so the policy does not need CUDA
+    # while the much larger evaluator is loaded.
+    policy.offload()
+    empty_cuda_cache()
+    evaluator: PrometheusEvaluator | None = None
+    try:
+        created_evaluator = EvaluatorModelFactory.create_model(
+            config.evaluator.class_name,
+            config.evaluator.model_name,
         )
-
-    return float(
-        evaluator.evaluate(
-            policy,
-            reset=config.evaluator_reset,
-            batch_size=config.evaluator_batch_size,
+        if not isinstance(created_evaluator, PrometheusEvaluator):
+            raise TypeError(
+                "This evaluation function currently requires PrometheusEvaluator"
+            )
+        evaluator = created_evaluator
+        return float(
+            evaluator.evaluate(
+                policy,
+                reset=config.evaluator_reset,
+                batch_size=config.evaluator_batch_size,
+            )
         )
-    )
+    finally:
+        offload_to_cpu(policy)
+        evaluator = None
+        empty_cuda_cache()

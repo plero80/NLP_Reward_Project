@@ -6,6 +6,7 @@ from typing import Any, Literal, overload
 from torch.utils.data import Dataset
 
 from Datasets.dataset_classifier import DatasetClassifier
+from Datasets.dataset_gap_finder import DatasetGapFinder
 from Datasets.dataset_request import RequestDataset
 from Models.lora import LoRASettings
 from Models.model_classifier import Classifier
@@ -13,6 +14,7 @@ from Models.model_evaluator import EvaluatorOpenAIModel, PrometheusEvaluator
 from Models.model_policy import PolicyModel
 from Models.model_reward import DeterministicReward, RewardModel
 from Models.models import PPORewardModelProtocol
+from Models.reward_adjustment import RewardAdjustment
 
 
 class RewardModelFactory:
@@ -39,6 +41,7 @@ class RewardModelFactory:
         mode_name: str,
         classifiers: Sequence[Classifier] = (),
         *,
+        adjustments: Sequence[RewardAdjustment] = (),
         mean: float | None = None,
         std: float | None = None,
     ) -> PPORewardModelProtocol:
@@ -68,6 +71,8 @@ class RewardModelFactory:
                 classifier,
                 classifier.tokenizer,
             )
+        for adjustment in adjustments:
+            reward.add_adjustment(adjustment)
         return reward
 
 
@@ -170,6 +175,7 @@ class DatasetFactory:
     _builders: dict[str, Callable[..., Dataset]] = {
         "RequestDataset": RequestDataset,
         "DatasetClassifier": DatasetClassifier,
+        "DatasetGapFinder": DatasetGapFinder,
     }
     _raw_builders: dict[
         str,

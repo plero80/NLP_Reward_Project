@@ -76,6 +76,7 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
         "second": object(),
     }
     in_memory_classifier = object()
+    in_memory_adjustment = object()
 
     monkeypatch.setattr(
         functions,
@@ -107,6 +108,7 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
         mode_name,
         classifiers,
         *,
+        adjustments=(),
         mean,
         std,
     ):
@@ -115,6 +117,7 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
             model_name,
             mode_name,
             tuple(classifiers),
+            tuple(adjustments),
             mean,
             std,
         )
@@ -171,6 +174,7 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
     result = functions.temp_ppo_train_policy(
         config,
         classifiers=(in_memory_classifier,),
+        adjustments=(in_memory_adjustment,),
     )
 
     assert result is policy
@@ -197,6 +201,7 @@ def test_temp_ppo_pipeline_uses_direct_component_specs(
             loaded_classifiers["first"],
             loaded_classifiers["second"],
         ),
+        (in_memory_adjustment,),
         1.25,
         0.5,
     )

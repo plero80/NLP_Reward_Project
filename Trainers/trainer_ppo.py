@@ -62,10 +62,17 @@ class PolicyPPOTrainer:
             raise ValueError(
                 "The reference policy must use the policy tokenizer vocabulary"
             )
-        for entry in self.reward.classifiers:
-            if entry["classifier"].tokenizer.get_vocab() != policy_vocabulary:
+        reward_adjustments = getattr(self.reward, "adjustments", None)
+        if reward_adjustments is None:
+            reward_adjustments = [
+                entry["classifier"]
+                for entry in getattr(self.reward, "classifiers", ())
+            ]
+        for adjustment in reward_adjustments:
+            tokenizer = adjustment.tokenizer
+            if tokenizer is not None and tokenizer.get_vocab() != policy_vocabulary:
                 raise ValueError(
-                    "Every reward classifier must use the policy tokenizer "
+                    "Every reward adjustment must use the policy tokenizer "
                     "vocabulary for TRL PPO"
                 )
         if self.reward.model.config.num_labels != 1:
@@ -122,8 +129,14 @@ class PolicyPPOTrainer:
         self.value.model.to(device)
         if self.reference_policy is not None:
             self.reference_policy.model.to(device)
-        for entry in self.reward.classifiers:
-            entry["classifier"].model.to(device)
+        adjustments = getattr(self.reward, "adjustments", None)
+        if adjustments is None:
+            adjustments = [
+                entry["classifier"]
+                for entry in getattr(self.reward, "classifiers", ())
+            ]
+        for adjustment in adjustments:
+            adjustment.model.to(device)
 
     def train(self) -> Any:
         PPOConfig, PPOTrainer = self._trl_classes()
