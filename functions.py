@@ -150,6 +150,8 @@ class ConfigTrainClassifier:
     gap_finder_output_root: str | Path = "outputs/gap_finders"
     gap_finder_epochs: float = 3.0
     gap_finder_batch_size: int = 32
+    gap_finder_gradient_accumulation_steps: int = 1
+    gap_finder_gradient_checkpointing: bool = False
     gap_finder_learning_rate: float = 2e-5
     gap_finder_max_length: int = 512
     gap_finder_lora_settings: LoRASettings | None = field(default_factory=LoRASettings)
@@ -183,6 +185,9 @@ def _validate_classifier_config(config: ConfigTrainClassifier) -> None:
         "classifier_batch_size": config.classifier_batch_size,
         "classifier_max_length": config.classifier_max_length,
         "gap_finder_batch_size": config.gap_finder_batch_size,
+        "gap_finder_gradient_accumulation_steps": (
+            config.gap_finder_gradient_accumulation_steps
+        ),
         "gap_finder_max_length": config.gap_finder_max_length,
     }
     for name, value in positive_sizes.items():
@@ -795,6 +800,10 @@ def create_gap_finder(
             output_dir=str(run_directory),
             epochs=config.gap_finder_epochs,
             batch_size=config.gap_finder_batch_size,
+            gradient_accumulation_steps=(
+                config.gap_finder_gradient_accumulation_steps
+            ),
+            gradient_checkpointing=config.gap_finder_gradient_checkpointing,
             learning_rate=config.gap_finder_learning_rate,
             max_length=config.gap_finder_max_length,
             lora_settings=config.gap_finder_lora_settings,

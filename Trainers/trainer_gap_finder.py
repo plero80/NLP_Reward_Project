@@ -81,6 +81,8 @@ class GapFinderTrainingConfig:
     output_dir: str
     epochs: float = 3.0
     batch_size: int = 8
+    gradient_accumulation_steps: int = 1
+    gradient_checkpointing: bool = False
     learning_rate: float = 2e-5
     max_length: int = 512
     lora_settings: LoRASettings | None = None
@@ -151,6 +153,8 @@ class GapFinderTrainer:
             learning_rate=self.config.learning_rate,
             per_device_train_batch_size=self.config.batch_size,
             per_device_eval_batch_size=self.config.batch_size,
+            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+            gradient_checkpointing=self.config.gradient_checkpointing,
             eval_strategy="epoch" if has_evaluation else "no",
             save_strategy="epoch",
             load_best_model_at_end=has_evaluation,
