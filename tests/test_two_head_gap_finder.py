@@ -25,6 +25,21 @@ def test_two_head_report_uses_dedicated_detector_probabilities() -> None:
     assert report["detector_pr_auc"] == pytest.approx(1.0)
 
 
+def test_two_head_report_accepts_tuned_detector_threshold() -> None:
+    report = compute_two_head_report(
+        actual_gaps=[0.0, 2.0, 3.0],
+        predicted_gaps=[0.0, 1.5, 2.5],
+        detection_probabilities=[0.1, 0.9, 0.4],
+        theta=1.0,
+        detector_threshold=0.3,
+    )
+
+    assert report["detector_threshold"] == pytest.approx(0.3)
+    assert report["detector_precision"] == pytest.approx(1.0)
+    assert report["detector_recall"] == pytest.approx(1.0)
+    assert report["detector_f1"] == pytest.approx(1.0)
+
+
 def test_two_head_loss_weights_tail_regression_and_positive_detection() -> None:
     class Model(torch.nn.Module):
         def __init__(self) -> None:

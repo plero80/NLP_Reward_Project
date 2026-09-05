@@ -30,6 +30,7 @@ def compute_two_head_report(
     predicted_gaps,
     detection_probabilities,
     theta: float,
+    detector_threshold: float = 0.5,
 ) -> dict[str, float | int]:
     """Report regression quality and dedicated tail-head detection quality."""
     labels = np.asarray(actual_gaps, dtype=np.float64).reshape(-1)
@@ -46,10 +47,13 @@ def compute_two_head_report(
         raise ValueError("two-head evaluation inputs must be finite")
     if np.any((probabilities < 0.0) | (probabilities > 1.0)):
         raise ValueError("detection probabilities must be between zero and one")
+    detector_threshold = float(detector_threshold)
+    if not np.isfinite(detector_threshold) or not 0.0 <= detector_threshold <= 1.0:
+        raise ValueError("detector_threshold must be between zero and one")
 
     regression_report = compute_gap_finder_report(labels, gaps, theta)
     actual_tail = labels > float(theta)
-    predicted_tail = probabilities >= 0.5
+    predicted_tail = probabilities >= detector_threshold
     report: dict[str, float | int] = {
         "mse": regression_report["mse"],
         "mae": regression_report["mae"],
@@ -75,6 +79,7 @@ def compute_two_head_report(
         "test_examples": int(labels.size),
         "actual_d_gt_theta": int(actual_tail.sum()),
         "predicted_d_gt_theta": int(predicted_tail.sum()),
+        "detector_threshold": detector_threshold,
     }
     if np.unique(actual_tail).size == 2:
         report["detector_pr_auc"] = float(
