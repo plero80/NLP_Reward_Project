@@ -11,6 +11,7 @@ from Models.model_reward import CompositeRewardModel
 from Models.reward_adjustment import GapFinderCorrection
 from Trainers.trainer_gap_finder import compute_gap_metrics
 from Trainers.trainer_gap_finder import _Float32RegressionTrainer
+import functions
 
 
 def test_gap_dataset_uses_continuous_normalized_difference(tmp_path: Path) -> None:
@@ -110,3 +111,76 @@ def test_composite_adds_raw_gap_correction_before_normalizing() -> None:
 
     # raw: 3 - (2 * .5) = 2; normalized: (2 - 1) / .5 = 2
     assert torch.allclose(scores, torch.full_like(scores, 2.0))
+
+
+def test_evaluate_gap_finder_reports_scores_and_corrected_outcome(monkeypatch) -> None:
+    class Policy:
+        def __init__(self) -> None:
+            self.offloaded = False
+
+        def generate_batch(self, prompts):
+            return [f"answer:{prompt}" for prompt in prompts]
+
+        def offload(self):
+            self.offloaded = True
+
+    class GapFinder:
+        def __init__(self) -> None:
+            self.moved = False
+            self.offloaded = False
+
+        def move_to_current_device(self):
+            self.moved = True
+
+        def predict_gap(self, prompts, answers, **_kwargs):
+            return [0.5] * len(prompts)
+
+        def offload(self):
+            self.offloaded = True
+
+    def score_rows(*, spec, row_groups, **_kwargs):
+        values = [5.0] if spec.mode_name == "proxy" else [2.0]
+        return {"evaluation": np.asarray(values)}
+
+    monkeypatch.setattr(functions, "_score_policy_rows", score_rows)
+    monkeypatch.setattr(functions, "empty_cuda_cache", lambda: None)
+    policy = Policy()
+    gap_finder = GapFinder()
+    calibration = functions.GapCalibration(
+        proxy_mean=1.0,
+        proxy_std=2.0,
+        judge_mean=0.0,
+        judge_std=1.0,
+        theta=1.0,
+    )
+
+    results = functions.evaluate_gap_finder(
+        ["prompt"],
+        policy=policy,
+        gap_finder=gap_finder,
+        config=functions.ConfigTrainClassifier(),
+        calibration=calibration,
+    )
+
+    numeric_result = {
+        key: value
+        for key, value in results[0].items()
+        if key not in {"prompt", "answer"}
+    }
+    assert numeric_result == pytest.approx(
+        {
+            "proxy_score": 5.0,
+            "judge_score": 2.0,
+            "proxy_z": 2.0,
+            "judge_z": 2.0,
+            "actual_gap": 0.0,
+            "predicted_gap": 0.5,
+            "final_proxy_score": 4.0,
+            "final_proxy_z": 1.5,
+            "final_gap_vs_judge": -0.5,
+        }
+    )
+    assert results[0]["prompt"] == "prompt"
+    assert results[0]["answer"] == "answer:prompt"
+    assert policy.offloaded
+    assert gap_finder.moved and gap_finder.offloaded

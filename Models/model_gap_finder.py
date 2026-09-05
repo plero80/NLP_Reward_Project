@@ -71,6 +71,14 @@ class GapFinder:
             predictions.extend(values)
         return predictions
 
+    def move_to_current_device(self) -> torch.device:
+        device = current_device()
+        self.model.to(device)
+        return device
+
+    def offload(self) -> None:
+        self.model.to("cpu")
+
     def save(self, path: str | Path) -> Path:
         destination = Path(path).expanduser()
         destination.mkdir(parents=True, exist_ok=True)

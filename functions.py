@@ -814,6 +814,109 @@ def create_gap_finder(
         empty_cuda_cache()
 
 
+def evaluate_gap_finder(
+    prompts: Sequence[str],
+    *,
+    policy: PolicyModel,
+    gap_finder: GapFinder,
+    config: ConfigTrainClassifier,
+    calibration: GapCalibration,
+    generation_batch_size: int = 8,
+) -> list[dict[str, str | float]]:
+    """Inspect raw scores, normalized gaps, and GapFinder corrections.
+
+    GapFinder predicts ``proxy_z - judge_z``.  The final corrected proxy is
+    therefore ``proxy_z - predicted_gap`` (or equivalently, in raw proxy
+    units, ``proxy_score - predicted_gap * proxy_std``).
+    """
+    _validate_classifier_config(config)
+    _validate_gap_calibration(calibration)
+    if generation_batch_size < 1:
+        raise ValueError("generation_batch_size must be at least 1")
+    prompt_list = list(prompts)
+    if not prompt_list:
+        raise ValueError("prompts cannot be empty")
+    if not all(isinstance(prompt, str) for prompt in prompt_list):
+        raise TypeError("prompts must contain only strings")
+
+    answers: list[str] = []
+    try:
+        for start in range(0, len(prompt_list), generation_batch_size):
+            generated = policy.generate_batch(
+                prompt_list[start : start + generation_batch_size]
+            )
+            answers.extend(generated)
+    finally:
+        policy.offload()
+        empty_cuda_cache()
+    if len(answers) != len(prompt_list):
+        raise RuntimeError("Policy returned a different number of answers than prompts")
+
+    rows = (prompt_list, answers)
+    proxy_scores = _score_policy_rows(
+        spec=config.reward,
+        batch_size=config.reward_batch_size,
+        max_length=config.score_max_length,
+        row_groups={"evaluation": rows},
+    )["evaluation"]
+    judge_scores = _score_policy_rows(
+        spec=config.judge,
+        batch_size=config.judge_batch_size,
+        max_length=config.score_max_length,
+        row_groups={"evaluation": rows},
+    )["evaluation"]
+
+    gap_finder.move_to_current_device()
+    try:
+        predicted_gaps = np.asarray(
+            gap_finder.predict_gap(
+                prompt_list,
+                answers,
+                batch_size=config.gap_finder_batch_size,
+                max_length=config.gap_finder_max_length,
+            ),
+            dtype=np.float64,
+        )
+    finally:
+        gap_finder.offload()
+        empty_cuda_cache()
+    if predicted_gaps.shape != proxy_scores.shape:
+        raise ValueError(
+            f"GapFinder returned shape {predicted_gaps.shape}; expected "
+            f"{proxy_scores.shape}"
+        )
+    if not np.isfinite(predicted_gaps).all():
+        raise ValueError("GapFinder predictions must be finite")
+
+    proxy_z = (proxy_scores - calibration.proxy_mean) / calibration.proxy_std
+    judge_z = (judge_scores - calibration.judge_mean) / calibration.judge_std
+    actual_gaps = proxy_z - judge_z
+    corrected_proxy_z = proxy_z - predicted_gaps
+    corrected_proxy_scores = (
+        proxy_scores - predicted_gaps * calibration.proxy_std
+    )
+    residual_gaps = corrected_proxy_z - judge_z
+
+    results: list[dict[str, str | float]] = []
+    for index, (prompt, answer) in enumerate(zip(prompt_list, answers)):
+        results.append(
+            {
+                "prompt": prompt,
+                "answer": answer,
+                "proxy_score": float(proxy_scores[index]),
+                "judge_score": float(judge_scores[index]),
+                "proxy_z": float(proxy_z[index]),
+                "judge_z": float(judge_z[index]),
+                "actual_gap": float(actual_gaps[index]),
+                "predicted_gap": float(predicted_gaps[index]),
+                "final_proxy_score": float(corrected_proxy_scores[index]),
+                "final_proxy_z": float(corrected_proxy_z[index]),
+                "final_gap_vs_judge": float(residual_gaps[index]),
+            }
+        )
+    return results
+
+
 def _ppo_output_directory(
     config: ConfigEval  | TrainingPPOConfig,
 ) -> str:
