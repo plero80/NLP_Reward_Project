@@ -10,6 +10,7 @@ from Datasets.dataset_gap_finder import DatasetGapFinder
 from Models.model_reward import CompositeRewardModel
 from Models.reward_adjustment import GapFinderCorrection
 from Trainers.trainer_gap_finder import compute_gap_metrics
+from Trainers.trainer_gap_finder import compute_gap_finder_report
 from Trainers.trainer_gap_finder import _Float32RegressionTrainer
 import functions
 
@@ -31,7 +32,47 @@ def test_gap_metrics_are_regression_metrics() -> None:
             label_ids=np.array([2.0, 3.0]),
         )
     )
-    assert metrics == pytest.approx({"mae": 0.5, "mse": 0.5, "rmse": 0.5 ** 0.5})
+    assert metrics["mae"] == pytest.approx(0.5)
+    assert metrics["mse"] == pytest.approx(0.5)
+    assert metrics["rmse"] == pytest.approx(0.5 ** 0.5)
+    assert metrics["r2"] == pytest.approx(-1.0)
+    assert metrics["pearson"] == pytest.approx(1.0)
+    assert metrics["spearman"] == pytest.approx(1.0)
+
+
+def test_three_way_split_is_70_15_15_and_disjoint() -> None:
+    dataset = DatasetGapFinder(id="split")
+    dataset.add(
+        [f"p{i}" for i in range(20)],
+        [f"a{i}" for i in range(20)],
+        list(range(20)),
+        [0.0] * 20,
+    )
+    train, validation, test = dataset.split_three_way(random_state=7)
+
+    assert (len(train), len(validation), len(test)) == (14, 3, 3)
+    prompt_sets = [
+        {row["prompt"] for row in split.dataset}
+        for split in (train, validation, test)
+    ]
+    assert prompt_sets[0].isdisjoint(prompt_sets[1])
+    assert prompt_sets[0].isdisjoint(prompt_sets[2])
+    assert prompt_sets[1].isdisjoint(prompt_sets[2])
+
+
+def test_gap_report_includes_high_gap_detector_metrics() -> None:
+    report = compute_gap_finder_report(
+        actual_gaps=[0.0, 1.5, 2.0, 3.0],
+        predicted_gaps=[0.1, 1.2, 2.5, 0.0],
+        theta=1.0,
+    )
+
+    assert report["mae_d_gt_theta"] == pytest.approx((0.3 + 0.5 + 3.0) / 3)
+    assert report["precision_d_gt_theta"] == pytest.approx(1.0)
+    assert report["recall_d_gt_theta"] == pytest.approx(2 / 3)
+    assert report["f1_d_gt_theta"] == pytest.approx(0.8)
+    assert report["actual_d_gt_theta"] == 3
+    assert report["predicted_d_gt_theta"] == 2
 
 
 def test_regression_loss_supports_bfloat16_logits_and_float32_labels() -> None:

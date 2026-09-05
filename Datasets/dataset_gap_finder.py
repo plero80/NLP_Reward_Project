@@ -82,6 +82,43 @@ class DatasetGapFinder(Dataset):
         test.dataset = list(test_rows)
         return train, test
 
+    def split_three_way(
+        self,
+        train_size: float = 0.70,
+        validation_size: float = 0.15,
+        test_size: float = 0.15,
+        random_state: int = 42,
+    ) -> tuple[DatasetGapFinder, DatasetGapFinder, DatasetGapFinder]:
+        """Create disjoint randomized train/validation/test datasets."""
+        sizes = (float(train_size), float(validation_size), float(test_size))
+        if not all(math.isfinite(size) and size > 0.0 for size in sizes):
+            raise ValueError("all split sizes must be finite and positive")
+        if not math.isclose(sum(sizes), 1.0, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError("train, validation, and test sizes must sum to 1")
+        if len(self.dataset) < 3:
+            raise ValueError("at least three examples are required for a three-way split")
+
+        train_rows, remaining_rows = train_test_split(
+            self.dataset,
+            train_size=train_size,
+            random_state=random_state,
+            shuffle=True,
+        )
+        relative_test_size = test_size / (validation_size + test_size)
+        validation_rows, test_rows = train_test_split(
+            remaining_rows,
+            test_size=relative_test_size,
+            random_state=random_state,
+            shuffle=True,
+        )
+        train = DatasetGapFinder(id=self.id)
+        validation = DatasetGapFinder(id=self.id)
+        test = DatasetGapFinder(id=self.id)
+        train.dataset = list(train_rows)
+        validation.dataset = list(validation_rows)
+        test.dataset = list(test_rows)
+        return train, validation, test
+
     @staticmethod
     def _normalize_row(row: object) -> dict[str, Any]:
         if not isinstance(row, dict):

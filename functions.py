@@ -814,6 +814,56 @@ def create_gap_finder(
         empty_cuda_cache()
 
 
+def collect_gap_finder_dataset(
+    config: ConfigTrainClassifier,
+    calibration: GapCalibration,
+    *,
+    policy: PolicyModel | None = None,
+) -> DatasetGapFinder:
+    """Generate policy responses and label them with frozen normalized gaps."""
+    _validate_classifier_config(config)
+    _validate_gap_calibration(calibration)
+    if policy is not None and config.policy.checkpoint is not None:
+        raise ValueError("Pass either policy or config.policy.checkpoint, not both")
+
+    raw_dataset = load_dataset(config.dataset_name)
+    request_dataset = RequestDataset.from_raw(
+        raw_dataset,
+        config.policy.model_name,
+    )
+    request_dataset.truncate(config.start_dataset, config.end_dataset)
+    if len(request_dataset) == 0:
+        raise ValueError("The selected GapFinder dataset range is empty")
+    target_rows = _generate_policy_rows(
+        config,
+        request_dataset,
+        reference=False,
+        supplied_policy=policy,
+    )
+    target_proxy = _score_policy_rows(
+        spec=config.reward,
+        batch_size=config.reward_batch_size,
+        max_length=config.score_max_length,
+        row_groups={"target": target_rows},
+    )["target"]
+    target_judge = _score_policy_rows(
+        spec=config.judge,
+        batch_size=config.judge_batch_size,
+        max_length=config.score_max_length,
+        row_groups={"target": target_rows},
+    )["target"]
+    target_proxy_z = (target_proxy - calibration.proxy_mean) / calibration.proxy_std
+    target_judge_z = (target_judge - calibration.judge_mean) / calibration.judge_std
+    dataset = DatasetGapFinder()
+    dataset.add(
+        target_rows[0],
+        target_rows[1],
+        target_proxy_z.tolist(),
+        target_judge_z.tolist(),
+    )
+    return dataset
+
+
 def evaluate_gap_finder(
     prompts: Sequence[str],
     *,

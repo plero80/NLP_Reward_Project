@@ -6,6 +6,8 @@ from datasets import Dataset as HFDataset
 import numpy as np
 from peft import PeftModel, TaskType, get_peft_model
 import torch.nn.functional as F
+from scipy.stats import pearsonr, spearmanr
+from sklearn.metrics import f1_score, precision_score, recall_score, r2_score
 from transformers import DataCollatorWithPadding, EvalPrediction, Trainer, TrainingArguments
 
 from Datasets.dataset_gap_finder import DatasetGapFinder
@@ -17,10 +19,60 @@ def compute_gap_metrics(evaluation: EvalPrediction) -> dict[str, float]:
     predictions = np.asarray(evaluation.predictions).reshape(-1)
     labels = np.asarray(evaluation.label_ids).reshape(-1)
     errors = predictions - labels
-    return {
+    metrics = {
         "mae": float(np.mean(np.abs(errors))),
         "mse": float(np.mean(errors ** 2)),
         "rmse": float(np.sqrt(np.mean(errors ** 2))),
+        "r2": float(r2_score(labels, predictions)) if len(labels) >= 2 else float("nan"),
+    }
+    if len(labels) >= 2 and np.std(labels) > 0 and np.std(predictions) > 0:
+        metrics["pearson"] = float(pearsonr(labels, predictions).statistic)
+        metrics["spearman"] = float(spearmanr(labels, predictions).statistic)
+    else:
+        metrics["pearson"] = float("nan")
+        metrics["spearman"] = float("nan")
+    return metrics
+
+
+def compute_gap_finder_report(
+    actual_gaps,
+    predicted_gaps,
+    theta: float,
+) -> dict[str, float | int]:
+    """Regression quality plus ``gap > theta`` detector performance."""
+    labels = np.asarray(actual_gaps, dtype=np.float64).reshape(-1)
+    predictions = np.asarray(predicted_gaps, dtype=np.float64).reshape(-1)
+    if labels.shape != predictions.shape or labels.size == 0:
+        raise ValueError("actual and predicted gaps must be non-empty and have equal shape")
+    if not np.isfinite(labels).all() or not np.isfinite(predictions).all():
+        raise ValueError("actual and predicted gaps must be finite")
+    theta = float(theta)
+    if not np.isfinite(theta):
+        raise ValueError("theta must be finite")
+
+    metrics = compute_gap_metrics(
+        EvalPrediction(predictions=predictions, label_ids=labels)
+    )
+    actual_detector = labels > theta
+    predicted_detector = predictions > theta
+    high_gap_errors = np.abs(predictions[actual_detector] - labels[actual_detector])
+    return {
+        **metrics,
+        "mae_d_gt_theta": (
+            float(high_gap_errors.mean()) if high_gap_errors.size else float("nan")
+        ),
+        "precision_d_gt_theta": float(
+            precision_score(actual_detector, predicted_detector, zero_division=0)
+        ),
+        "recall_d_gt_theta": float(
+            recall_score(actual_detector, predicted_detector, zero_division=0)
+        ),
+        "f1_d_gt_theta": float(
+            f1_score(actual_detector, predicted_detector, zero_division=0)
+        ),
+        "test_examples": int(labels.size),
+        "actual_d_gt_theta": int(actual_detector.sum()),
+        "predicted_d_gt_theta": int(predicted_detector.sum()),
     }
 
 
