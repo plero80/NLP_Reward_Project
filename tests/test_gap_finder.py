@@ -8,7 +8,7 @@ from transformers import EvalPrediction
 
 from Datasets.dataset_gap_finder import DatasetGapFinder
 from Models.model_reward import CompositeRewardModel
-from Models.reward_adjustment import GapFinderCorrection
+from Models.reward_adjustment import GapFinderCorrection, TwoHeadGapFinderCorrection
 from Trainers.trainer_gap_finder import compute_gap_metrics
 from Trainers.trainer_gap_finder import compute_gap_finder_report
 from Trainers.trainer_gap_finder import _Float32RegressionTrainer
@@ -121,6 +121,38 @@ def test_gap_correction_scales_and_reverses_proxy_minus_judge_gap() -> None:
 
     head = correction.ppo_head()
     assert head(torch.tensor([[2, 0]])).tolist() == [-1.0]
+
+
+class _TwoHeadModel(torch.nn.Module):
+    def forward(self, input_ids, **_kwargs):
+        gap = input_ids[:, 0].float()
+        detector_logit = input_ids[:, 1].float()
+        return SimpleNamespace(logits=torch.stack((gap, detector_logit), dim=1))
+
+
+class _FakeTwoHeadGapFinder:
+    id = "two-head-gap-finder"
+    tokenizer = None
+
+    def __init__(self) -> None:
+        self.model = _TwoHeadModel()
+
+    def predict(self, prompts, answers):
+        return [-2.0, 2.0, 8.0], [0.9, 0.4, 0.9]
+
+
+def test_two_head_correction_is_gated_non_positive_and_capped() -> None:
+    correction = TwoHeadGapFinderCorrection(
+        _FakeTwoHeadGapFinder(),
+        reward_std=0.5,
+        detector_threshold=0.7,
+        max_gap=3.0,
+    )
+    assert correction(["a", "b", "c"], ["x", "y", "z"]) == [0.0, 0.0, -1.5]
+
+    head = correction.ppo_head()
+    values = head(torch.tensor([[-2, 3], [2, 0], [8, 3]]))
+    assert values.tolist() == [0.0, 0.0, -1.5]
 
 
 def test_composite_adds_raw_gap_correction_before_normalizing() -> None:

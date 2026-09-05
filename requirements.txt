@@ -1,6 +1,7 @@
 openai
 python-dotenv
 numpy
+matplotlib
 torch>=2.6
 datasets
 scikit-learn
